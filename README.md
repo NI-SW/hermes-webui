@@ -381,6 +381,14 @@ Full list of environment variables:
 
 Extension deployments can inspect sanitized, authenticated diagnostics at `GET /api/extensions/status`; see [WebUI Extensions](docs/EXTENSIONS.md#diagnostics).
 
+The `i2stream_backend/` directory contains the bundled port-50091 compatibility
+service used by the integrated container deployment. It owns the browser
+extension API, node report ingestion, knowledge/report/history storage, and the
+authenticated Hermes Gateway WebSocket bridge. The WebUI itself remains on
+port 8787 and proxies only its allowlisted i2Stream management routes to this
+loopback service. Browser chat keeps the WebUI's default in-process backend;
+the separately running Hermes Gateway remains dedicated to the extension bridge.
+
 ---
 
 ### Nix flake and NixOS module
