@@ -12200,6 +12200,12 @@ def _render_index_shell_base() -> str:
 
 def handle_get(handler, parsed) -> bool:
     """Handle all GET routes. Returns True if handled, False for 404."""
+    from api.i2stream_console import handle_proxy as handle_i2stream_console_proxy
+
+    proxy_result = handle_i2stream_console_proxy(handler, parsed, "GET")
+    if proxy_result is not False:
+        return proxy_result
+
     proxy_result = _handle_extension_sidecar_proxy(handler, parsed, "GET")
     if proxy_result is not False:
         return proxy_result
@@ -14182,6 +14188,18 @@ def handle_post(handler, parsed) -> bool:
         finally:
             if diag:
                 diag.finish()
+    from api.i2stream_console import handle_proxy as handle_i2stream_console_proxy
+
+    proxy_result = handle_i2stream_console_proxy(
+        handler,
+        parsed,
+        "POST",
+        read_request_body=True,
+    )
+    if proxy_result is not False:
+        if diag:
+            diag.finish()
+        return proxy_result
     proxy_result = _handle_extension_sidecar_proxy(
         handler,
         parsed,
@@ -16862,6 +16880,11 @@ def handle_patch(handler, parsed) -> bool:
     """Handle all PATCH routes. Returns True if handled, False for 404."""
     if not _check_csrf(handler):
         return j(handler, {"error": _csrf_rejection_error(handler)}, status=403)
+    from api.i2stream_console import handle_proxy as handle_i2stream_console_proxy
+
+    proxy_result = handle_i2stream_console_proxy(handler, parsed, "PATCH")
+    if proxy_result is not False:
+        return proxy_result
     proxy_result = _handle_extension_sidecar_proxy(
         handler,
         parsed,
@@ -16890,6 +16913,16 @@ def handle_delete(handler, parsed) -> bool:
     """Handle all DELETE routes. Returns True if handled, False for 404."""
     if not _check_csrf(handler):
         return j(handler, {"error": _csrf_rejection_error(handler)}, status=403)
+    from api.i2stream_console import handle_proxy as handle_i2stream_console_proxy
+
+    proxy_result = handle_i2stream_console_proxy(
+        handler,
+        parsed,
+        "DELETE",
+        read_request_body=True,
+    )
+    if proxy_result is not False:
+        return proxy_result
     proxy_result = _handle_extension_sidecar_proxy(
         handler,
         parsed,
@@ -16926,6 +16959,11 @@ def handle_put(handler, parsed) -> bool:
     """Handle all PUT routes. Returns True if handled, False for 404."""
     if not _check_csrf(handler):
         return j(handler, {"error": "Cross-origin request rejected"}, status=403)
+    from api.i2stream_console import handle_proxy as handle_i2stream_console_proxy
+
+    proxy_result = handle_i2stream_console_proxy(handler, parsed, "PUT")
+    if proxy_result is not False:
+        return proxy_result
     proxy_result = _handle_extension_sidecar_proxy(
         handler,
         parsed,

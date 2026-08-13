@@ -1,0 +1,600 @@
+// Native i2Stream Console surface. The backend remains the only owner of
+// global knowledge, reports, and browser-plugin conversation history.
+
+const I2STREAM_API = '/api/i2stream-console';
+const I2STREAM_HISTORY_PAGE_SIZE = 30;
+const I2STREAM_SECTIONS = new Set(['knowledge', 'reports', 'history']);
+const I2STREAM_CLIENT_ID_RE = /^[A-Za-z0-9_-]{16,128}$/;
+const _i2streamState = {
+  section: 'knowledge',
+  loaded: {knowledge: false, reports: false, history: false},
+  knowledgeFiles: [],
+  reports: [],
+  conversations: [],
+  historyClientId: null,
+  nextBefore: null,
+  selectedConversationKey: null,
+  selectedReportToken: null,
+  knowledgeTaskGeneration: 0,
+  requestGeneration: {knowledge: 0, reports: 0, history: 0},
+  historyDetailGeneration: 0,
+  bindingsReady: false,
+};
+
+function _i2ContractObject(value, label) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new TypeError(`${label} must be an object`);
+  }
+  return value;
+}
+
+function _i2ContractString(value, label, allowEmpty = false) {
+  if (typeof value !== 'string' || (!allowEmpty && !value)) {
+    throw new TypeError(`${label} must be ${allowEmpty ? 'a string' : 'a non-empty string'}`);
+  }
+  return value;
+}
+
+function _i2Success(value, label) {
+  const payload = _i2ContractObject(value, label);
+  if (payload.code !== 0 || payload.status !== 'success') {
+    throw new TypeError(`${label} must be a successful i2Stream response`);
+  }
+  return payload;
+}
+
+function _i2ConversationKey(clientId, conversationId) {
+  return JSON.stringify([clientId, conversationId]);
+}
+
+function parseConversationPage(value) {
+  const payload = _i2Success(value, 'conversation page');
+  if (!Array.isArray(payload.conversations)) {
+    throw new TypeError('conversation page conversations must be an array');
+  }
+  if (!Object.prototype.hasOwnProperty.call(payload, 'next_before') ||
+      !(payload.next_before === null || (Number.isSafeInteger(payload.next_before) && payload.next_before > 0))) {
+    throw new TypeError('conversation page next_before must be a positive safe integer or null');
+  }
+  const conversations = payload.conversations.map((raw, index) => {
+    const item = _i2ContractObject(raw, `conversation ${index}`);
+    const clientId = _i2ContractString(item.client_id, `conversation ${index} client_id`);
+    const conversationId = _i2ContractString(item.conversation_id, `conversation ${index} conversation_id`);
+    if (!Number.isInteger(item.message_count) || item.message_count < 0) {
+      throw new TypeError(`conversation ${index} message_count must be a non-negative integer`);
+    }
+    return {
+      clientId,
+      conversationId,
+      conversationKey: _i2ConversationKey(clientId, conversationId),
+      messageCount: item.message_count,
+      latestMessageAt: _i2ContractString(item.latest_message_at, `conversation ${index} latest_message_at`),
+      preview: _i2ContractString(item.preview, `conversation ${index} preview`, true),
+    };
+  });
+  return {conversations, nextBefore: payload.next_before};
+}
+
+function parseConversationDetail(value) {
+  const payload = _i2Success(value, 'conversation detail');
+  const conversationId = _i2ContractString(payload.conversation_id, 'conversation detail conversation_id');
+  if (!Array.isArray(payload.messages)) {
+    throw new TypeError('conversation detail messages must be an array');
+  }
+  const messages = payload.messages.map((raw, index) => {
+    const item = _i2ContractObject(raw, `message ${index}`);
+    if (!Number.isSafeInteger(item.id) || item.id < 1) {
+      throw new TypeError(`message ${index} id must be a positive safe integer`);
+    }
+    return {
+      id: item.id,
+      role: _i2ContractString(item.role, `message ${index} role`),
+      content: _i2ContractString(item.content, `message ${index} content`, true),
+      createdAt: _i2ContractString(item.created_at, `message ${index} created_at`),
+    };
+  });
+  return {conversationId, messages};
+}
+
+function parseKnowledgeFiles(value) {
+  const payload = _i2Success(value, 'knowledge files');
+  if (!Array.isArray(payload.files)) throw new TypeError('knowledge files must be an array');
+  return payload.files.map((raw, index) => {
+    const item = _i2ContractObject(raw, `knowledge file ${index}`);
+    if (!(item.file_size === null || (Number.isSafeInteger(item.file_size) && item.file_size >= 0))) {
+      throw new TypeError(`knowledge file ${index} file_size must be a non-negative safe integer or null`);
+    }
+    if (!(item.total_chunks === null || (Number.isSafeInteger(item.total_chunks) && item.total_chunks >= 0))) {
+      throw new TypeError(`knowledge file ${index} total_chunks must be a non-negative safe integer or null`);
+    }
+    return {
+      fileId: _i2ContractString(item.file_id, `knowledge file ${index} file_id`),
+      displayName: _i2ContractString(item.display_name, `knowledge file ${index} display_name`),
+      fileType: _i2ContractString(item.file_type, `knowledge file ${index} file_type`, true),
+      fileSize: item.file_size,
+      uploadTime: _i2ContractString(item.upload_time, `knowledge file ${index} upload_time`, true),
+      totalChunks: item.total_chunks,
+    };
+  });
+}
+
+function parseReports(value) {
+  const payload = _i2Success(value, 'reports');
+  if (!Array.isArray(payload.files)) throw new TypeError('reports files must be an array');
+  if (typeof payload.server_time !== 'number' || !Number.isFinite(payload.server_time)) {
+    throw new TypeError('reports server_time must be a finite number');
+  }
+  return payload.files.map((raw, index) => {
+    const item = _i2ContractObject(raw, `report ${index}`);
+    if (typeof item.size !== 'number' || !Number.isFinite(item.size) || item.size < 0) {
+      throw new TypeError(`report ${index} size must be a non-negative number`);
+    }
+    if (typeof item.created_at !== 'number' || !Number.isFinite(item.created_at)) {
+      throw new TypeError(`report ${index} created_at must be a finite number`);
+    }
+    return {
+      token: _i2ContractString(item.token, `report ${index} token`),
+      name: _i2ContractString(item.name, `report ${index} name`),
+      mediaType: _i2ContractString(item.media_type, `report ${index} media_type`),
+      size: item.size,
+      createdAt: item.created_at,
+      description: _i2ContractString(item.description, `report ${index} description`, true),
+    };
+  });
+}
+
+function conversationPageUrl(clientId, limit, before) {
+  if (!I2STREAM_CLIENT_ID_RE.test(clientId)) throw new TypeError('client id is invalid');
+  if (!Number.isInteger(limit) || limit < 1) throw new TypeError('conversation page limit must be a positive integer');
+  const query = new URLSearchParams({client_id: clientId, limit: String(limit)});
+  if (before !== null) {
+    if (!Number.isSafeInteger(before) || before < 1) throw new TypeError('conversation cursor must be a positive safe integer');
+    query.set('before', String(before));
+  }
+  return `${I2STREAM_API}/conversations?${query.toString()}`;
+}
+
+function conversationDetailUrl(conversationId, clientId) {
+  const query = new URLSearchParams({client_id: _i2ContractString(clientId, 'client id')});
+  return `${I2STREAM_API}/conversations/${encodeURIComponent(_i2ContractString(conversationId, 'conversation id'))}/messages?${query.toString()}`;
+}
+
+function _i2Text(key, ...args) {
+  return typeof t === 'function' ? t(key, ...args) : key;
+}
+
+function _i2Escape(value) {
+  return String(value).replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
+}
+
+function _i2FormatBytes(value) {
+  if (value === null) return '—';
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function _i2FormatDate(value, seconds = false) {
+  const date = new Date(seconds ? value * 1000 : value);
+  return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString();
+}
+
+function _i2SetStatus(id, message, kind = '') {
+  const element = document.getElementById(id);
+  if (!element) return;
+  element.textContent = message;
+  element.dataset.kind = kind;
+}
+
+function _i2RenderFailure(containerId, statusId, error) {
+  const message = error instanceof Error ? error.message : String(error);
+  _i2SetStatus(statusId, `${_i2Text('error_prefix')}${message}`, 'error');
+  const container = document.getElementById(containerId);
+  if (container) container.innerHTML = `<div class="i2stream-empty i2stream-error">${_i2Escape(message)}</div>`;
+}
+
+function _i2EnsureBindings() {
+  if (_i2streamState.bindingsReady) return;
+  const fileInput = document.getElementById('i2streamKnowledgeFile');
+  if (fileInput) {
+    fileInput.addEventListener('change', () => {
+      const label = document.getElementById('i2streamKnowledgeFileLabel');
+      if (label) label.textContent = fileInput.files.length === 1 ? fileInput.files[0].name : _i2Text('i2stream_choose_file');
+    });
+  }
+  const history = document.getElementById('i2streamHistoryList');
+  if (history) history.addEventListener('keydown', _i2HistoryKeydown);
+  _i2streamState.bindingsReady = true;
+}
+
+async function loadI2StreamConsole(force = false) {
+  _i2EnsureBindings();
+  return switchI2StreamSection(_i2streamState.section, force);
+}
+
+async function switchI2StreamSection(section, force = false) {
+  if (!I2STREAM_SECTIONS.has(section)) throw new TypeError(`Unsupported i2Stream section: ${section}`);
+  _i2streamState.section = section;
+  document.querySelectorAll('[data-i2stream-section]').forEach(button => {
+    const active = button.dataset.i2streamSection === section;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-selected', active ? 'true' : 'false');
+  });
+  document.querySelectorAll('[data-i2stream-page]').forEach(page => {
+    page.hidden = page.dataset.i2streamPage !== section;
+  });
+  const title = document.getElementById('i2streamMainTitle');
+  if (title) {
+    const key = {knowledge:'i2stream_knowledge',reports:'i2stream_reports',history:'i2stream_history'}[section];
+    title.dataset.i18n = key;
+    title.textContent = _i2Text(key);
+  }
+  const scoped = section === 'history';
+  const scopeExplainer = document.getElementById('i2streamScopeExplainer');
+  const scopeBadge = document.getElementById('i2streamScopeBadge');
+  const sideScope = document.getElementById('i2streamSideScope');
+  const sideScopeText = document.getElementById('i2streamSideScopeText');
+  if (scopeExplainer) {
+    const key = scoped ? 'i2stream_client_explainer' : 'i2stream_global_explainer';
+    scopeExplainer.dataset.i18n = key;
+    scopeExplainer.textContent = _i2Text(key);
+  }
+  if (scopeBadge) {
+    const key = scoped ? 'i2stream_client_scoped' : 'i2stream_global_shared';
+    scopeBadge.dataset.i18n = key;
+    scopeBadge.dataset.i2streamScope = scoped ? 'client' : 'global';
+    scopeBadge.textContent = _i2Text(key);
+  }
+  if (sideScope) sideScope.dataset.i2streamScope = scoped ? 'client' : 'global';
+  if (sideScopeText) {
+    const key = scoped ? 'i2stream_client_scoped' : 'i2stream_global_shared';
+    sideScopeText.dataset.i18n = key;
+    sideScopeText.textContent = _i2Text(key);
+  }
+  if (typeof _isDesktopWidth === 'function' && !_isDesktopWidth() && typeof closeMobileSidebar === 'function') {
+    closeMobileSidebar();
+  }
+  if (section === 'knowledge' && (force || !_i2streamState.loaded.knowledge)) await loadI2StreamKnowledge();
+  if (section === 'reports' && (force || !_i2streamState.loaded.reports)) await loadI2StreamReports();
+  if (section === 'history') {
+    if (_i2streamState.historyClientId && (force || !_i2streamState.loaded.history)) {
+      await loadI2StreamHistory(true);
+    } else if (!_i2streamState.historyClientId) {
+      _i2RenderHistoryPrompt();
+    }
+  }
+}
+
+async function refreshI2StreamConsole() {
+  _i2streamState.knowledgeTaskGeneration += 1;
+  _i2streamState.loaded[_i2streamState.section] = false;
+  await switchI2StreamSection(_i2streamState.section, true);
+}
+
+async function loadI2StreamKnowledge() {
+  const generation = ++_i2streamState.requestGeneration.knowledge;
+  _i2SetStatus('i2streamKnowledgeStatus', _i2Text('loading'));
+  try {
+    const files = parseKnowledgeFiles(await api(`${I2STREAM_API}/knowledge/files`));
+    if (generation !== _i2streamState.requestGeneration.knowledge) return;
+    _i2streamState.knowledgeFiles = files;
+    _i2streamState.loaded.knowledge = true;
+    _i2RenderKnowledge();
+    _i2SetStatus('i2streamKnowledgeStatus', '');
+  } catch (error) {
+    if (generation !== _i2streamState.requestGeneration.knowledge) return;
+    _i2RenderFailure('i2streamKnowledgeList', 'i2streamKnowledgeStatus', error);
+  }
+}
+
+function _i2RenderKnowledge() {
+  const container = document.getElementById('i2streamKnowledgeList');
+  if (!container) return;
+  if (!_i2streamState.knowledgeFiles.length) {
+    container.innerHTML = `<div class="i2stream-empty">${_i2Escape(_i2Text('i2stream_empty_knowledge'))}</div>`;
+    return;
+  }
+  container.innerHTML = '';
+  _i2streamState.knowledgeFiles.forEach(file => {
+    const row = document.createElement('article');
+    row.className = 'i2stream-row';
+    row.innerHTML = `<div class="i2stream-row-main"><div class="i2stream-row-title">${_i2Escape(file.displayName)}</div><div class="i2stream-row-meta"><span>${_i2Escape(file.fileType || 'file')}</span><span>${_i2Escape(_i2FormatBytes(file.fileSize))}</span><span>${file.totalChunks === null ? '—' : `${file.totalChunks} chunks`}</span><span>${_i2Escape(_i2FormatDate(file.uploadTime))}</span></div></div><button type="button" class="i2stream-action danger">${_i2Escape(_i2Text('delete_title'))}</button>`;
+    row.querySelector('button').addEventListener('click', () => deleteI2StreamKnowledge(file.fileId, file.displayName));
+    container.appendChild(row);
+  });
+}
+
+async function uploadI2StreamKnowledge(event) {
+  event.preventDefault();
+  const input = document.getElementById('i2streamKnowledgeFile');
+  const button = document.getElementById('i2streamKnowledgeUploadBtn');
+  let generation = null;
+  try {
+    if (!input || input.files.length !== 1) throw new TypeError('Select exactly one knowledge file');
+    if (input.files[0].size > MAX_UPLOAD_BYTES) throw new Error(_uploadTooLargeMessage(input.files[0]));
+    generation = ++_i2streamState.knowledgeTaskGeneration;
+    if (button) button.disabled = true;
+    _i2SetStatus('i2streamKnowledgeStatus', _i2Text('uploading'));
+    const form = new FormData();
+    form.append('file', input.files[0], input.files[0].name);
+    const payload = _i2Success(await api(`${I2STREAM_API}/knowledge/files`, {method:'POST', headers:{}, body:form, retries:0}), 'knowledge upload');
+    const file = _i2ContractObject(payload.file, 'knowledge upload file');
+    const taskId = _i2ContractString(file.task_id, 'knowledge upload task_id');
+    await _i2WaitForKnowledgeTask(taskId, generation);
+    if (generation !== _i2streamState.knowledgeTaskGeneration) return;
+    input.value = '';
+    const label = document.getElementById('i2streamKnowledgeFileLabel');
+    if (label) label.textContent = _i2Text('i2stream_choose_file');
+    await loadI2StreamKnowledge();
+  } catch (error) {
+    _i2SetStatus('i2streamKnowledgeStatus', `${_i2Text('upload_failed')}${error.message}`, 'error');
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+async function _i2WaitForKnowledgeTask(taskId, generation) {
+  for (let attempt = 0; attempt < 120; attempt += 1) {
+    if (generation !== _i2streamState.knowledgeTaskGeneration) return;
+    const payload = _i2Success(await api(`${I2STREAM_API}/knowledge/tasks/${encodeURIComponent(taskId)}`), 'knowledge task');
+    const task = _i2ContractObject(payload.task, 'knowledge task payload');
+    _i2ContractString(task.status, 'knowledge task status');
+    if (typeof task.terminal !== 'boolean') throw new TypeError('knowledge task terminal must be a boolean');
+    _i2SetStatus('i2streamKnowledgeStatus', task.message && typeof task.message === 'string' ? task.message : task.status);
+    if (task.terminal) {
+      if (task.status !== 'completed') throw new Error(typeof task.error === 'string' && task.error ? task.error : 'Knowledge indexing failed');
+      return;
+    }
+    await new Promise(resolve => setTimeout(resolve, 1000));
+  }
+  throw new Error('Knowledge indexing timed out');
+}
+
+async function deleteI2StreamKnowledge(fileId, displayName) {
+  const confirmed = await showConfirmDialog({title:`${_i2Text('delete_title')} ${displayName}?`,message:'',confirmLabel:_i2Text('delete_title'),danger:true,focusCancel:true});
+  if (!confirmed) return;
+  try {
+    _i2Success(await api(`${I2STREAM_API}/knowledge/files/${encodeURIComponent(fileId)}`, {method: 'DELETE'}), 'knowledge delete');
+    await loadI2StreamKnowledge();
+  } catch (error) {
+    _i2SetStatus('i2streamKnowledgeStatus', `${_i2Text('error_prefix')}${error.message}`, 'error');
+  }
+}
+
+async function loadI2StreamReports() {
+  const generation = ++_i2streamState.requestGeneration.reports;
+  _i2SetStatus('i2streamReportsStatus', _i2Text('loading'));
+  try {
+    const reports = parseReports(await api(`${I2STREAM_API}/reports`));
+    if (generation !== _i2streamState.requestGeneration.reports) return;
+    _i2streamState.reports = reports;
+    _i2streamState.loaded.reports = true;
+    _i2RenderReports();
+    _i2SetStatus('i2streamReportsStatus', '');
+  } catch (error) {
+    if (generation !== _i2streamState.requestGeneration.reports) return;
+    _i2RenderFailure('i2streamReportsList', 'i2streamReportsStatus', error);
+  }
+}
+
+function _i2ReportContentUrl(token) {
+  const path = `${I2STREAM_API}/reports/${encodeURIComponent(_i2ContractString(token, 'report token'))}/content`;
+  return resolveI2StreamBrowserUrl(path, document.baseURI || window.location.href);
+}
+
+function resolveI2StreamBrowserUrl(path, baseUri) {
+  const normalizedPath = _i2ContractString(path, 'browser path').replace(/^\/+/, '');
+  return new URL(normalizedPath, _i2ContractString(baseUri, 'browser base URI')).href;
+}
+
+function _i2RenderReports() {
+  const container = document.getElementById('i2streamReportsList');
+  if (!container) return;
+  if (!_i2streamState.reports.length) {
+    container.innerHTML = `<div class="i2stream-empty">${_i2Escape(_i2Text('i2stream_empty_reports'))}</div>`;
+    return;
+  }
+  container.innerHTML = '';
+  _i2streamState.reports.forEach(report => {
+    const row = document.createElement('article');
+    row.className = `i2stream-row selectable${report.token === _i2streamState.selectedReportToken ? ' selected' : ''}`;
+    row.innerHTML = `<div class="i2stream-row-main"><div class="i2stream-row-title">${_i2Escape(report.name)}</div><div class="i2stream-row-desc">${_i2Escape(report.description)}</div><div class="i2stream-row-meta"><span>${_i2Escape(_i2FormatBytes(report.size))}</span><span>${_i2Escape(_i2FormatDate(report.createdAt, true))}</span></div></div><div class="i2stream-row-actions"><button type="button" class="i2stream-action preview">${_i2Escape(_i2Text('i2stream_preview'))}</button><a class="i2stream-action" href="${_i2Escape(_i2ReportContentUrl(report.token))}" download>${_i2Escape(_i2Text('i2stream_download'))}</a><button type="button" class="i2stream-action danger">${_i2Escape(_i2Text('delete_title'))}</button></div>`;
+    const buttons = row.querySelectorAll('button');
+    buttons[0].addEventListener('click', () => previewI2StreamReport(report.token));
+    buttons[1].addEventListener('click', () => deleteI2StreamReport(report.token, report.name));
+    container.appendChild(row);
+  });
+}
+
+function previewI2StreamReport(token) {
+  const report = _i2streamState.reports.find(item => item.token === token);
+  if (!report) throw new TypeError('Report is not in the current global report list');
+  _i2streamState.selectedReportToken = token;
+  _i2RenderReports();
+  const preview = document.getElementById('i2streamReportPreview');
+  if (!preview) return;
+  const url = _i2ReportContentUrl(token);
+  preview.innerHTML = `<div class="i2stream-preview-head"><strong>${_i2Escape(report.name)}</strong><a class="i2stream-action" href="${_i2Escape(url)}" download>${_i2Escape(_i2Text('i2stream_download'))}</a></div><iframe class="i2stream-report-frame" src="${_i2Escape(url)}" sandbox title="${_i2Escape(report.name)}"></iframe>`;
+}
+
+async function deleteI2StreamReport(token, name) {
+  const confirmed = await showConfirmDialog({title:`${_i2Text('delete_title')} ${name}?`,message:'',confirmLabel:_i2Text('delete_title'),danger:true,focusCancel:true});
+  if (!confirmed) return;
+  try {
+    _i2Success(await api(`${I2STREAM_API}/reports/${encodeURIComponent(token)}`, {method: 'DELETE'}), 'report delete');
+    if (_i2streamState.selectedReportToken === token) {
+      _i2streamState.selectedReportToken = null;
+      const preview = document.getElementById('i2streamReportPreview');
+      if (preview) preview.innerHTML = `<div class="i2stream-empty">${_i2Escape(_i2Text('i2stream_select_report'))}</div>`;
+    }
+    await loadI2StreamReports();
+  } catch (error) {
+    _i2SetStatus('i2streamReportsStatus', `${_i2Text('error_prefix')}${error.message}`, 'error');
+  }
+}
+
+async function loadI2StreamHistory(reset = false) {
+  if (!_i2streamState.historyClientId) {
+    _i2RenderHistoryPrompt();
+    return;
+  }
+  const before = reset ? null : _i2streamState.nextBefore;
+  if (!reset && before === null) return;
+  const generation = ++_i2streamState.requestGeneration.history;
+  const more = document.getElementById('i2streamHistoryMore');
+  if (more) more.disabled = true;
+  _i2SetStatus('i2streamHistoryStatus', _i2Text('loading'));
+  try {
+    const page = parseConversationPage(await api(conversationPageUrl(_i2streamState.historyClientId, I2STREAM_HISTORY_PAGE_SIZE, before)));
+    if (generation !== _i2streamState.requestGeneration.history) return;
+    const merged = reset ? [] : _i2streamState.conversations.slice();
+    const byKey = new Map(merged.map(item => [item.conversationKey, item]));
+    page.conversations.forEach(item => byKey.set(item.conversationKey, item));
+    _i2streamState.conversations = Array.from(byKey.values());
+    _i2streamState.nextBefore = page.nextBefore;
+    _i2streamState.loaded.history = true;
+    _i2RenderHistory();
+    _i2SetStatus('i2streamHistoryStatus', '');
+  } catch (error) {
+    if (generation !== _i2streamState.requestGeneration.history) return;
+    _i2RenderFailure('i2streamHistoryList', 'i2streamHistoryStatus', error);
+  } finally {
+    if (generation === _i2streamState.requestGeneration.history && more) more.disabled = false;
+  }
+}
+
+function _i2ResetHistoryResults() {
+  _i2streamState.requestGeneration.history += 1;
+  _i2streamState.historyDetailGeneration += 1;
+  _i2streamState.loaded.history = false;
+  _i2streamState.conversations = [];
+  _i2streamState.nextBefore = null;
+  _i2streamState.selectedConversationKey = null;
+  const detail = document.getElementById('i2streamHistoryDetail');
+  if (detail) detail.innerHTML = `<div class="i2stream-empty">${_i2Escape(_i2Text('i2stream_select_history'))}</div>`;
+}
+
+function _i2RenderHistoryPrompt() {
+  const container = document.getElementById('i2streamHistoryList');
+  if (container) container.innerHTML = `<div class="i2stream-empty">${_i2Escape(_i2Text('i2stream_enter_client_id'))}</div>`;
+  const more = document.getElementById('i2streamHistoryMore');
+  if (more) more.hidden = true;
+  _i2SetStatus('i2streamHistoryStatus', '');
+}
+
+async function submitI2StreamHistoryClientId(event) {
+  event.preventDefault();
+  const input = document.getElementById('i2streamHistoryClientId');
+  const clientId = input ? input.value.trim() : '';
+  if (!I2STREAM_CLIENT_ID_RE.test(clientId)) {
+    _i2SetStatus('i2streamHistoryStatus', _i2Text('i2stream_invalid_client_id'), 'error');
+    return;
+  }
+  if (_i2streamState.historyClientId !== clientId) {
+    _i2streamState.historyClientId = clientId;
+    _i2ResetHistoryResults();
+  }
+  await loadI2StreamHistory(true);
+}
+
+async function loadMoreI2StreamHistory() {
+  await loadI2StreamHistory(false);
+}
+
+function _i2RenderHistory() {
+  const container = document.getElementById('i2streamHistoryList');
+  if (!container) return;
+  if (!_i2streamState.conversations.length) {
+    container.innerHTML = `<div class="i2stream-empty">${_i2Escape(_i2Text('i2stream_empty_history'))}</div>`;
+  } else {
+    container.innerHTML = '';
+    _i2streamState.conversations.forEach((conversation, index) => {
+      const row = document.createElement('button');
+      row.type = 'button';
+      row.className = `i2stream-row i2stream-history-row${conversation.conversationKey === _i2streamState.selectedConversationKey ? ' selected' : ''}`;
+      row.dataset.conversationKey = conversation.conversationKey;
+      row.setAttribute('role', 'option');
+      row.setAttribute('aria-selected', conversation.conversationKey === _i2streamState.selectedConversationKey ? 'true' : 'false');
+      row.tabIndex = index === 0 ? 0 : -1;
+      row.innerHTML = `<div class="i2stream-row-main"><div class="i2stream-row-title">${_i2Escape(conversation.preview || conversation.conversationId)}</div><div class="i2stream-row-meta"><span>${_i2Escape(_i2Text('n_messages', conversation.messageCount))}</span><span>${_i2Escape(_i2FormatDate(conversation.latestMessageAt))}</span></div></div><span class="i2stream-row-arrow" aria-hidden="true">›</span>`;
+      row.addEventListener('click', () => selectI2StreamConversation(conversation.conversationKey));
+      container.appendChild(row);
+    });
+  }
+  const more = document.getElementById('i2streamHistoryMore');
+  if (more) more.hidden = _i2streamState.nextBefore === null;
+}
+
+async function selectI2StreamConversation(conversationKey) {
+  const conversation = _i2streamState.conversations.find(item => item.conversationKey === conversationKey);
+  if (!conversation) throw new TypeError('Conversation is not in the current client history page');
+  _i2streamState.selectedConversationKey = conversationKey;
+  const generation = ++_i2streamState.historyDetailGeneration;
+  _i2RenderHistory();
+  const detail = document.getElementById('i2streamHistoryDetail');
+  if (detail) detail.innerHTML = `<div class="i2stream-empty">${_i2Escape(_i2Text('loading'))}</div>`;
+  try {
+    const payload = parseConversationDetail(await api(conversationDetailUrl(conversation.conversationId, conversation.clientId)));
+    if (generation !== _i2streamState.historyDetailGeneration ||
+        _i2streamState.selectedConversationKey !== conversationKey) return;
+    _i2RenderHistoryDetail(payload, conversation);
+  } catch (error) {
+    if (generation !== _i2streamState.historyDetailGeneration ||
+        _i2streamState.selectedConversationKey !== conversationKey) return;
+    if (detail) detail.innerHTML = `<div class="i2stream-empty i2stream-error">${_i2Escape(error.message)}</div>`;
+  }
+}
+
+function _i2RenderHistoryDetail(payload, conversation) {
+  const detail = document.getElementById('i2streamHistoryDetail');
+  if (!detail) return;
+  const messages = payload.messages.map(message => `<article class="i2stream-message" data-role="${_i2Escape(message.role)}"><div class="i2stream-message-head"><span>${_i2Escape(message.role)}</span><time>${_i2Escape(_i2FormatDate(message.createdAt))}</time></div><div class="i2stream-message-body">${_i2Escape(message.content)}</div></article>`).join('');
+  detail.innerHTML = `<div class="i2stream-detail-head"><div><strong>${_i2Escape(conversation.preview || payload.conversationId)}</strong><div>${_i2Escape(_i2Text('n_messages', payload.messages.length))}</div></div></div><div class="i2stream-message-list">${messages || `<div class="i2stream-empty">${_i2Escape(_i2Text('i2stream_empty_messages'))}</div>`}</div>`;
+}
+
+function _i2HistoryKeydown(event) {
+  if (!['ArrowDown', 'ArrowUp', 'Enter', 'Escape'].includes(event.key)) return;
+  const rows = Array.from(event.currentTarget.querySelectorAll('.i2stream-history-row'));
+  if (!rows.length) return;
+  const current = rows.indexOf(document.activeElement);
+  if (event.key === 'Enter' && current >= 0) {
+    event.preventDefault();
+    rows[current].click();
+    return;
+  }
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    const tab = document.querySelector('[data-i2stream-section="history"]');
+    if (tab) tab.focus();
+    return;
+  }
+  if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+    event.preventDefault();
+    const delta = event.key === 'ArrowDown' ? 1 : -1;
+    const next = current < 0 ? 0 : (current + delta + rows.length) % rows.length;
+    rows.forEach((row, index) => { row.tabIndex = index === next ? 0 : -1; });
+    rows[next].focus();
+  }
+}
+
+window.__i2streamConsoleTest = {
+  parseConversationPage,
+  parseConversationDetail,
+  parseKnowledgeFiles,
+  parseReports,
+  conversationPageUrl,
+  conversationDetailUrl,
+  loadI2StreamHistory,
+  resolveI2StreamBrowserUrl,
+};
+
+// i2Stream links are additive query parameters, so existing session path/query
+// routing remains intact. Invalid views deliberately fall back to Knowledge.
+if (typeof document !== 'undefined') document.addEventListener('DOMContentLoaded', () => {
+  const query = new URLSearchParams(window.location.search || '');
+  if (query.get('panel') !== 'i2stream') return;
+  const requestedView = query.get('view');
+  const view = I2STREAM_SECTIONS.has(requestedView) ? requestedView : 'knowledge';
+  _i2streamState.section = view;
+  if (typeof switchPanel === 'function') switchPanel('i2stream');
+});

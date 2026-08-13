@@ -161,6 +161,7 @@
     <button class="rail-btn nav-tab has-tooltip" data-panel="profiles" onclick="switchPanel('profiles',{fromRailClick:true})" data-tooltip="Agent profiles" data-i18n-title="tab_profiles" aria-label="Agent profiles"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></button>
     <button class="rail-btn nav-tab has-tooltip" data-panel="todos" onclick="switchPanel('todos',{fromRailClick:true})" data-tooltip="Current task list" data-i18n-title="tab_todos" aria-label="Todos"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="6" height="6" rx="1"/><path d="m3 17 2 2 4-4"/><path d="M13 6h8"/><path d="M13 12h8"/><path d="M13 18h8"/></svg></button>
     <button class="rail-btn nav-tab has-tooltip" data-panel="insights" onclick="switchPanel('insights',{fromRailClick:true})" data-tooltip="Insights" data-i18n-title="tab_insights" aria-label="Insights"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 20V10"/><path d="M12 20V4"/><path d="M6 20v-6"/></svg></button>
+    <button class="rail-btn nav-tab has-tooltip" data-panel="i2stream" onclick="switchPanel('i2stream',{fromRailClick:true})" data-tooltip="i2Stream" data-i18n-title="tab_i2stream" aria-label="i2Stream"><img class="i2stream-nav-icon" src="static/i2.ico?v=__WEBUI_VERSION__" alt="" aria-hidden="true"></button>
     <button class="rail-btn nav-tab dashboard-link has-tooltip" id="dashboardRailBtn" data-dashboard-link style="display:none" onclick="openHermesDashboard(event)" data-tooltip="Hermes Dashboard" data-i18n-title="tab_dashboard" aria-label="Hermes Dashboard"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/><path d="M9 21V9"/></svg><span class="dashboard-external-badge" aria-hidden="true"></span></button>
     <button class="rail-btn nav-tab has-tooltip" data-panel="logs" onclick="switchPanel('logs',{fromRailClick:true})" data-tooltip="Logs" data-i18n-title="tab_logs" aria-label="Logs"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M8 13h8"/><path d="M8 17h8"/><path d="M8 9h2"/></svg></button>
     <div class="rail-spacer"></div>
@@ -180,6 +181,7 @@
       <button class="nav-tab has-tooltip has-tooltip--bottom" data-panel="profiles" data-label="Profiles" onclick="switchPanel('profiles',{fromRailClick:true})" data-tooltip="Agent profiles" data-i18n-title="tab_profiles"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></button>
       <button class="nav-tab has-tooltip has-tooltip--bottom" data-panel="todos" data-label="Todos" onclick="switchPanel('todos',{fromRailClick:true})" data-tooltip="Current task list" data-i18n-title="tab_todos"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="6" height="6" rx="1"/><path d="m3 17 2 2 4-4"/><path d="M13 6h8"/><path d="M13 12h8"/><path d="M13 18h8"/></svg></button>
       <button class="nav-tab has-tooltip has-tooltip--bottom" data-panel="insights" data-label="Insights" onclick="switchPanel('insights',{fromRailClick:true})" data-tooltip="Insights" data-i18n-title="tab_insights"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 20V10"/><path d="M12 20V4"/><path d="M6 20v-6"/></svg></button>
+      <button class="nav-tab has-tooltip has-tooltip--bottom" data-panel="i2stream" data-label="i2Stream" onclick="switchPanel('i2stream',{fromRailClick:true})" data-tooltip="i2Stream" data-i18n-title="tab_i2stream"><img class="i2stream-nav-icon" src="static/i2.ico?v=__WEBUI_VERSION__" alt="" aria-hidden="true"></button>
       <button class="nav-tab dashboard-link has-tooltip has-tooltip--bottom" id="dashboardMobileBtn" data-dashboard-link data-label="Dashboard" style="display:none" onclick="openHermesDashboard(event)" data-tooltip="Hermes Dashboard" data-i18n-title="tab_dashboard"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/><path d="M9 21V9"/></svg><span class="dashboard-external-badge" aria-hidden="true"></span></button>
       <button class="nav-tab has-tooltip has-tooltip--bottom" data-panel="logs" data-label="Logs" onclick="switchPanel('logs',{fromRailClick:true})" data-tooltip="Logs" data-i18n-title="tab_logs"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M8 13h8"/><path d="M8 17h8"/><path d="M8 9h2"/></svg></button>
       <!-- Settings button mirrored here for mobile (rail is desktop-only via @media >=768px). Keep in sync with rail entry. -->
@@ -339,6 +341,34 @@
         <label class="logs-check-row"><input id="logsAutoRefresh" type="checkbox" checked onchange="_syncLogsAutoRefresh()"><span data-i18n="logs_auto_refresh">Auto-refresh (5s)</span></label>
         <label class="logs-check-row"><input id="logsWrap" type="checkbox" onchange="_syncLogsWrap()"><span data-i18n="logs_wrap">Wrap lines</span></label>
         <button type="button" class="logs-copy" id="logsCopyAll" onclick="copyLogsAll()" data-i18n="logs_copy_all">Copy all</button>
+      </div>
+    </div>
+    <div class="panel-view" id="panelI2stream">
+      <div class="panel-head">
+        <span data-i18n="tab_i2stream">i2Stream</span>
+        <div class="panel-head-actions">
+          <button class="panel-head-btn has-tooltip has-tooltip--bottom" type="button" onclick="refreshI2StreamConsole()" data-tooltip="Refresh" data-i18n-title="kanban_refresh" aria-label="Refresh i2Stream data" data-i18n-aria-label="kanban_refresh">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+          </button>
+        </div>
+      </div>
+      <div class="i2stream-scope-note" id="i2streamSideScope" data-i2stream-scope="global">
+        <span class="i2stream-scope-mark" aria-hidden="true"></span>
+        <span id="i2streamSideScopeText" data-i18n="i2stream_global_shared">Global shared</span>
+      </div>
+      <div class="side-menu i2stream-side-menu" role="tablist" aria-label="i2Stream sections" data-i18n-aria-label="i2stream_sections">
+        <button type="button" class="side-menu-item active" role="tab" aria-selected="true" data-i2stream-section="knowledge" onclick="switchI2StreamSection('knowledge')">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+          <span data-i18n="i2stream_knowledge">Knowledge</span>
+        </button>
+        <button type="button" class="side-menu-item" role="tab" aria-selected="false" data-i2stream-section="reports" onclick="switchI2StreamSection('reports')">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M8 13h8M8 17h5"/></svg>
+          <span data-i18n="i2stream_reports">Reports</span>
+        </button>
+        <button type="button" class="side-menu-item" role="tab" aria-selected="false" data-i2stream-section="history" onclick="switchI2StreamSection('history')">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5M12 7v5l3 2"/></svg>
+          <span data-i18n="i2stream_history">Plugin history</span>
+        </button>
       </div>
     </div>
     <!-- Settings panel (menu list; actual panes render in .main) -->
@@ -921,6 +951,56 @@
         <div class="main-view-content logs-content">
           <div class="logs-output" id="logsOutput"><div class="logs-empty" data-i18n="logs_empty">No log lines yet.</div></div>
         </div>
+      </div>
+    </div>
+    <div id="mainI2stream" class="main-view">
+      <div class="main-view-header i2stream-main-header">
+        <div>
+          <div class="main-view-title" id="i2streamMainTitle" data-i18n="i2stream_knowledge">Knowledge</div>
+          <div class="i2stream-main-sub" id="i2streamScopeExplainer" data-i18n="i2stream_global_explainer">Shared across every browser plugin and conversation.</div>
+        </div>
+        <span class="i2stream-global-badge" id="i2streamScopeBadge" data-i2stream-scope="global" data-i18n="i2stream_global_shared">Global shared</span>
+      </div>
+      <div class="main-view-body i2stream-main-body" id="i2streamMainContent">
+        <section class="i2stream-page" data-i2stream-page="knowledge" aria-labelledby="i2streamMainTitle">
+          <form class="i2stream-toolbar" id="i2streamKnowledgeUpload" onsubmit="uploadI2StreamKnowledge(event)">
+            <label class="i2stream-file-pick" for="i2streamKnowledgeFile">
+              <input id="i2streamKnowledgeFile" type="file" name="file" accept=".txt,.md,.pdf,.docx,.xls,.xlsx" required>
+              <span id="i2streamKnowledgeFileLabel" data-i18n="i2stream_choose_file">Choose a knowledge file</span>
+            </label>
+            <button class="sm-btn" type="submit" id="i2streamKnowledgeUploadBtn" data-i18n="i2stream_upload">Upload</button>
+          </form>
+          <div class="i2stream-status" id="i2streamKnowledgeStatus" role="status" aria-live="polite"></div>
+          <div class="i2stream-collection" id="i2streamKnowledgeList"></div>
+        </section>
+        <section class="i2stream-page" data-i2stream-page="reports" aria-labelledby="i2streamMainTitle" hidden>
+          <div class="i2stream-status" id="i2streamReportsStatus" role="status" aria-live="polite"></div>
+          <div class="i2stream-split">
+            <div class="i2stream-collection" id="i2streamReportsList"></div>
+            <div class="i2stream-preview" id="i2streamReportPreview">
+              <div class="i2stream-empty" data-i18n="i2stream_select_report">Select a report to preview it.</div>
+            </div>
+          </div>
+        </section>
+        <section class="i2stream-page" data-i2stream-page="history" aria-labelledby="i2streamMainTitle" hidden>
+          <form class="i2stream-toolbar i2stream-history-query" id="i2streamHistoryQuery" onsubmit="submitI2StreamHistoryClientId(event)">
+            <label class="i2stream-client-field" for="i2streamHistoryClientId">
+              <span data-i18n="i2stream_client_id">Client ID</span>
+              <input id="i2streamHistoryClientId" name="client_id" type="text" minlength="16" maxlength="128" pattern="[A-Za-z0-9_-]{16,128}" autocomplete="off" spellcheck="false" required data-i18n-placeholder="i2stream_client_id_placeholder" placeholder="Enter a plugin client ID">
+            </label>
+            <button class="sm-btn" type="submit" data-i18n="i2stream_query_history">Query history</button>
+          </form>
+          <div class="i2stream-status" id="i2streamHistoryStatus" role="status" aria-live="polite"></div>
+          <div class="i2stream-split">
+            <div class="i2stream-history-column">
+              <div class="i2stream-collection" id="i2streamHistoryList" role="listbox" aria-label="Plugin conversations"></div>
+              <button class="sm-btn i2stream-load-more" type="button" id="i2streamHistoryMore" onclick="loadMoreI2StreamHistory()" data-i18n="i2stream_load_more" hidden>Load more</button>
+            </div>
+            <div class="i2stream-history-detail" id="i2streamHistoryDetail">
+              <div class="i2stream-empty" data-i18n="i2stream_select_history">Select a conversation to read its messages.</div>
+            </div>
+          </div>
+        </section>
       </div>
     </div>
     <div id="mainPlugin" class="main-view">
@@ -1780,6 +1860,7 @@
 <script src="static/messages.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/extension_settings.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/panels.js?v=__WEBUI_VERSION__" defer></script>
+<script src="static/i2stream_console.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/onboarding.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/boot.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/outline.js?v=__WEBUI_VERSION__" defer></script>

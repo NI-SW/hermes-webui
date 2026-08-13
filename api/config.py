@@ -50,6 +50,29 @@ REPO_ROOT = Path(__file__).parent.parent.resolve()
 HOST = os.getenv("HERMES_WEBUI_HOST", "127.0.0.1")
 PORT = int(os.getenv("HERMES_WEBUI_PORT", "8787"))
 
+# Optional compatibility service used by the authenticated, same-origin
+# i2Stream console API facade.  The bearer is never exposed to browsers.
+I2STREAM_CONSOLE_BASE_URL = os.getenv(
+    "HERMES_WEBUI_I2STREAM_CONSOLE_URL",
+    "http://127.0.0.1:50091",
+).strip()
+I2STREAM_CONSOLE_BEARER_TOKEN = (
+    os.getenv("HERMES_WEBUI_I2STREAM_CONSOLE_TOKEN", "").strip() or None
+)
+
+
+def _positive_finite_env_float(name: str, default: str) -> float:
+    value = float(os.getenv(name, default))
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(f"{name} must be a positive finite number")
+    return value
+
+
+I2STREAM_CONSOLE_TIMEOUT_SECONDS = _positive_finite_env_float(
+    "HERMES_WEBUI_I2STREAM_CONSOLE_TIMEOUT_SECONDS",
+    "30",
+)
+
 
 def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
     """Read a positive int from the environment, falling back on bad input.
