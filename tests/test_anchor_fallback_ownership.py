@@ -682,6 +682,8 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
         function _gatewayModelWarningText() {{ return ''; }}
         function _usedModelTurnChipLabel() {{ return ''; }}
         function _formatTurnDuration() {{ return ''; }}
+        function messageFeedbackEligible() {{ return false; }}
+        function messageFeedbackButtonsHtml() {{ return ''; }}
         function _renderSettledAnchorSceneForMessage(message, segment, rawIdx) {{
           const group = new FakeElement('div');
           group.className = 'tool-worklog-group agent-activity-group';

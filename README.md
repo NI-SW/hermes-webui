@@ -210,6 +210,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - File attachments persist across page reloads and are stored outside the active workspace by default (`~/.hermes/webui/attachments/<session_id>/`, or `HERMES_WEBUI_ATTACHMENT_DIR/<session_id>/` when configured)
 - Message timestamps (HH:MM next to each message, full date on hover)
 - Code block copy button with "Copied!" feedback
+- Like/dislike controls on completed assistant answers; clicking the selected control again clears the feedback
 - Syntax highlighting via Prism.js (Python, JS, bash, JSON, SQL, and more)
 - Safe HTML rendering in AI responses (bold, italic, code converted to markdown)
 - rAF-throttled token streaming for smoother rendering during long responses

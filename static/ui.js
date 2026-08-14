@@ -14956,7 +14956,7 @@ function _messageRenderCacheSignature(){
   add(messages.length);
   for(const m of messages){
     if(!m||typeof m!=='object'){ add('missing'); continue; }
-    add(m.role);add(m.timestamp);add(m._ts);add(m._error);add(m._statusCard);
+    add(m.role);add(m.timestamp);add(m._ts);add(m._error);add(m._statusCard);add(m._feedback);
     add(msgContent(m));
     if(Array.isArray(m.content)){
       add('content-array');
@@ -16587,6 +16587,8 @@ function renderMessages(options){
       : false;
     const forkBtn  = (readOnlySession&&!branchableReadOnlySession) ? '' : `<button class="msg-action-btn" title="${t('fork_from_here')}" onclick="forkFromMessage(${rawIdx+1})">${li('git-branch',13)}</button>`;
     const ttsBtn   = !isUser ? `<button class="msg-action-btn msg-tts-btn" title="${t('tts_listen')||'Listen'}" onclick="speakMessage(this)">${li('volume-2',13)}</button>` : '';
+    const feedbackEligible=messageFeedbackEligible(m,{isTurnFinalAssistant,isProcessWakeup,displayContent});
+    const feedbackBtns=messageFeedbackButtonsHtml(m,feedbackEligible);
     const tsVal=m._ts||m.timestamp;
     // _formatInServerTz handles fractional-hour offsets (India +0530 etc.)
     // correctly via offset arithmetic; bare toLocaleString is the browser-tz fallback.
@@ -16603,7 +16605,7 @@ function renderMessages(options){
     const questionJumpBtn = (_qJumpTarget!==undefined&&_qJumpTarget!==null)
       ? _questionJumpButtonHtml(_qJumpTarget, assistantRawIdxByQuestionRawIdx.get(_qJumpTarget)??rawIdx)
       : '';
-    const footHtml = `<div class="msg-foot">${timeHtml}<span class="msg-actions">${editBtn}${ttsBtn}${forkBtn}${copyBtn}${retryBtn}</span>${questionJumpBtn}</div>`;
+    const footHtml = `<div class="msg-foot">${timeHtml}<span class="msg-actions">${editBtn}${ttsBtn}${forkBtn}${copyBtn}${feedbackBtns}${retryBtn}</span>${questionJumpBtn}</div>`;
 
     if(_isContextCompactionMessage(m)){
       continue;

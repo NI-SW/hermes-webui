@@ -61,6 +61,12 @@ from api.session_events import (
 )
 from api.gateway_restart import restart_active_profile_gateway
 from api.shares import create_or_refresh_share, load_share, revoke_share
+from api.message_feedback import (
+    clear_feedback,
+    feedback_for_session,
+    prune_feedback_for_session,
+    set_feedback,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -4068,6 +4074,37 @@ def _normalize_anchor_scene_message_ref(message_ref) -> str:
         "timestamp": payload.get("timestamp") or "",
     }
     return _anchor_scene_message_ref_digest(canonical)
+
+
+def _messages_with_feedback(session_id: str, messages: list) -> list:
+    """Attach feedback projection fields without mutating Session.messages."""
+    stored = feedback_for_session(session_id)
+    projected = []
+    for message in messages:
+        if not isinstance(message, dict):
+            projected.append(message)
+            continue
+        if message.get("role") != "assistant" and "_feedback" not in message:
+            projected.append(message)
+            continue
+        copy_message = dict(message)
+        if message.get("role") == "assistant":
+            message_ref = _assistant_anchor_scene_message_ref(message)
+            copy_message["_feedback"] = stored.get(message_ref)
+        else:
+            copy_message.pop("_feedback", None)
+        projected.append(copy_message)
+    return projected
+
+
+def _prune_message_feedback(session_id: str, messages: list) -> None:
+    message_refs = {
+        _assistant_anchor_scene_message_ref(message)
+        for message in messages
+        if isinstance(message, dict) and message.get("role") == "assistant"
+    }
+    message_refs.discard("")
+    prune_feedback_for_session(session_id, message_refs)
 
 
 def _anchor_scene_records(session) -> dict:
@@ -9881,6 +9918,8 @@ from api.streaming import (
     generate_session_title_for_session,
     _compact_for_echo_compare,
     _strip_compact_echo_suffix,
+    _assistant_message_has_final_visible_text,
+    _is_context_compression_marker,
 )
 from api.gateway_chat import _run_gateway_chat_streaming, webui_gateway_chat_enabled
 from api.run_journal import (
@@ -13077,7 +13116,7 @@ def handle_get(handler, parsed) -> bool:
             except TypeError:
                 compact_session = s.compact()
             raw = compact_session | {
-                "messages": _truncated_msgs,
+                "messages": _messages_with_feedback(sid, _truncated_msgs),
                 "message_count": _merged_message_count,
                 "tool_calls": _session_tool_calls,
                 "active_stream_id": getattr(s, "active_stream_id", None),
@@ -14843,6 +14882,52 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/session/anchor-scene":
         return _handle_session_anchor_scene(handler, body)
 
+    if parsed.path == "/api/message-feedback":
+        try:
+            require(body, "session_id", "message_ref")
+        except ValueError as exc:
+            return bad(handler, str(exc))
+        feedback = body.get("feedback")
+        if feedback not in (None, "like", "dislike"):
+            return bad(handler, "feedback must be like, dislike, or null")
+        sid = body["session_id"]
+        if not isinstance(sid, str) or not is_safe_session_id(sid):
+            return bad(handler, "Invalid session_id", 400)
+        message_ref = _normalize_anchor_scene_message_ref(body["message_ref"])
+        if not re.fullmatch(r"[0-9a-f]{64}", message_ref):
+            return bad(handler, "Invalid message_ref", 400)
+        with _get_session_agent_lock(sid):
+            try:
+                session = get_session(sid)
+            except KeyError:
+                return bad(handler, "Session not found", 404)
+            message_index, message = _find_anchor_scene_message(
+                session.messages,
+                message_ref=message_ref,
+            )
+            if (
+                message is None
+                or message.get("_live")
+                or message.get("_error")
+                or not _assistant_message_has_final_visible_text(message)
+            ):
+                return bad(handler, "Assistant message not found", 404)
+            for candidate in session.messages[message_index + 1 :]:
+                if not isinstance(candidate, dict):
+                    continue
+                if candidate.get("role") == "user":
+                    break
+                if (
+                    candidate.get("role") == "assistant"
+                    and not _is_context_compression_marker(candidate)
+                ):
+                    return bad(handler, "Assistant message not found", 404)
+            if feedback is None:
+                clear_feedback(sid, message_ref)
+            else:
+                set_feedback(sid, message_ref, feedback)
+        return j(handler, {"ok": True, "feedback": feedback})
+
     if parsed.path == "/api/session/rename":
         try:
             require(body, "session_id", "title")
@@ -15179,6 +15264,8 @@ def handle_post(handler, parsed) -> bool:
             except Exception:
                 logger.debug("Failed to unlink session file %s", p)
             sidecar_deleted = not p.exists()
+            if sidecar_deleted:
+                _prune_message_feedback(sid, [])
             try:
                 prune_session_from_index(sid)
             except Exception:
@@ -15321,6 +15408,7 @@ def handle_post(handler, parsed) -> bool:
             from api.session_ops import apply_session_title_rename
             apply_session_title_rename(s, "Untitled")
             s.save()
+            _prune_message_feedback(sid, s.messages)
             persisted_clear = False
             try:
                 persisted = json.loads(s.path.read_text(encoding="utf-8"))
@@ -15381,6 +15469,7 @@ def handle_post(handler, parsed) -> bool:
 
             old_msg_count, old_ctx_count = truncate_session_at_keep(s, keep)
             s.save()
+            _prune_message_feedback(body["session_id"], s.messages)
             logger.info(
                 "truncate %s: messages %d→%d, context_messages %d→%d, watermark=%.2f",
                 body["session_id"], old_msg_count, len(s.messages or []),
@@ -15577,6 +15666,10 @@ def handle_post(handler, parsed) -> bool:
         try:
             from api.session_ops import retry_last
             result = retry_last(body["session_id"])
+            _prune_message_feedback(
+                body["session_id"],
+                get_session(body["session_id"]).messages,
+            )
             return j(handler, {"ok": True, **result})
         except KeyError:
             return bad(handler, "Session not found", 404)
@@ -15593,6 +15686,10 @@ def handle_post(handler, parsed) -> bool:
         try:
             from api.session_ops import undo_last
             result = undo_last(body["session_id"])
+            _prune_message_feedback(
+                body["session_id"],
+                get_session(body["session_id"]).messages,
+            )
             return j(handler, {"ok": True, **result})
         except KeyError:
             return bad(handler, "Session not found", 404)

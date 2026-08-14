@@ -178,6 +178,22 @@
     return typeof value==='string'?value.trim():'';
   }
 
+  function assistantTurnMessageRef(message){
+    if(!message||typeof message!=='object') return '';
+    let content=message.content||'';
+    if(Array.isArray(content)){
+      content=content.map(part=>{
+        if(part&&typeof part==='object') return part.text||part.content||part.input_text||'';
+        return String(part||'');
+      }).join('\n');
+    }
+    return JSON.stringify({
+      role:String(message.role||''),
+      content:String(content||'').replace(/\s+/g,' ').trim(),
+      timestamp:message._ts||message.timestamp||'',
+    });
+  }
+
   function _activityDisplayMode(value){
     return value==='transparent_stream'||value==='compact_worklog'||value==='hide_all_activity'
       ? value
@@ -1693,6 +1709,7 @@
     sourceEventClassification:SOURCE_EVENT_CLASSIFICATION,
     classificationOrder:CLASSIFICATION_ORDER,
     terminalStates:TERMINAL_STATES,
+    assistantTurnMessageRef,
     createAssistantTurnAnchorSeed,
     normalizeAssistantTurnAnchorTerminalState,
     assistantTurnAnchorEventDedupeKey,

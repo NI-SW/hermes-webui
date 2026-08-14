@@ -60,6 +60,7 @@ actions. The topbar remains focused on conversation context and the workspace/fi
       config.py            Discovery, globals, model detection, reloadable config
       helpers.py           HTTP helpers: j(), bad(), require(), safe_resolve(), security headers
       models.py            Session model + CRUD, per-session profile tracking, CLI/state.db bridge
+      message_feedback.py  Three-state assistant-answer feedback in a separate SQLite store
       profiles.py          Profile state management, hermes_cli wrapper
       onboarding.py        First-run onboarding status, real provider config writes, OAuth linking, readiness detection
       routes.py            All GET + POST route handlers (if/elif dispatch, no decorators)
@@ -106,6 +107,7 @@ State directory (runtime data, separate from source):
 
     ~/.hermes/webui/
     sessions/          One JSON file per session: {session_id}.json
+    message_feedback.db Feedback keyed by session_id + stable assistant message reference
     workspaces.json    Registered workspaces list
     last_workspace.txt Last-used workspace path
     settings.json      User settings (default model, workspace, send key, password hash)
@@ -1325,6 +1327,7 @@ Complete list of all HTTP endpoints as of Sprint 1 (v0.3).
     /api/session/new           {"model"?, "workspace"?} -> new session
     /api/session/update        {"session_id", "workspace"?, "model"?} -> updated session
     /api/session/delete        {"session_id"} -> {"ok": true}
+    /api/message-feedback      {"session_id", "message_ref", "feedback": "like"|"dislike"|null}
     /api/chat/start            {"session_id", "message", "model"?, "workspace"?}
                                -> {"stream_id", "session_id"}. Starts agent daemon thread.
     /api/chat                  (fallback, sync) {"session_id", "message", "model"?, "workspace"?}

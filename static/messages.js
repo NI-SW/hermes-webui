@@ -6876,7 +6876,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     return `${m.role}|${ts}|${body.slice(0,160)}`;
   }
-  const _EPHEMERAL_TURN_FIELDS=['_turnUsage','_turnDuration','_turnTps','_gatewayRouting','_statusCard','_anchor_stream_id','_anchor_activity_scene'];
+  const _EPHEMERAL_TURN_FIELDS=['_turnUsage','_turnDuration','_turnTps','_gatewayRouting','_statusCard','_anchor_stream_id','_anchor_activity_scene','_feedback'];
   function _isHistoricalAnchorActivityScene(scene){
     if(!scene||typeof scene!=='object') return false;
     const identity=scene.identity&&typeof scene.identity==='object'?scene.identity:null;
@@ -6898,6 +6898,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const pm=prevIdx.get(k); if(!pm) continue;
       for(const f of _EPHEMERAL_TURN_FIELDS){
         if(f==='_anchor_activity_scene'&&_isHistoricalAnchorActivityScene(pm[f])) continue;
+        if(f==='_feedback'&&Object.prototype.hasOwnProperty.call(nm,f)) continue;
         if(pm[f]!=null && nm[f]==null) nm[f]=pm[f];
       }
     }
