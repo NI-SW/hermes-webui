@@ -6465,6 +6465,13 @@ main.main > .main-view:not([id="mainChat"]):not([id="mainSettings"]) .main-view-
 .i2stream-file-pick:hover{border-color:var(--accent);color:var(--text);}
 .i2stream-file-pick input{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;}
 .i2stream-file-pick:focus-within{outline:2px solid var(--accent);outline-offset:2px;}
+.i2stream-batch-actions{display:flex;align-items:center;gap:10px;margin-bottom:10px;padding:8px 10px;border:1px solid var(--border);border-radius:9px;background:var(--surface);}
+.i2stream-batch-actions[hidden]{display:none;}
+.i2stream-check{display:inline-flex;align-items:center;gap:7px;color:var(--text);font-size:12px;cursor:pointer;}
+.i2stream-check input,.i2stream-row-select input{width:16px;height:16px;margin:0;accent-color:var(--accent);cursor:pointer;}
+.i2stream-check input:focus-visible,.i2stream-row-select input:focus-visible{outline:2px solid var(--accent);outline-offset:2px;}
+.i2stream-selection-count{color:var(--muted);font-size:11px;}
+.i2stream-batch-delete{margin-left:auto;}
 .i2stream-status{min-height:20px;color:var(--muted);font-size:12px;line-height:1.5;}
 .i2stream-status[data-kind="error"],.i2stream-error{color:var(--error);}
 .i2stream-collection{display:flex;flex-direction:column;gap:8px;min-width:0;}
@@ -6472,6 +6479,7 @@ main.main > .main-view:not([id="mainChat"]):not([id="mainSettings"]) .main-view-
 .i2stream-row.selectable,.i2stream-history-row{cursor:pointer;}
 .i2stream-row.selectable:hover,.i2stream-history-row:hover,.i2stream-row.selected{border-color:var(--accent);background:var(--accent-bg);}
 .i2stream-row:focus-visible,.i2stream-action:focus-visible,.i2stream-load-more:focus-visible{outline:2px solid var(--accent);outline-offset:2px;}
+.i2stream-row-select{display:flex;align-items:center;justify-content:center;align-self:stretch;min-width:20px;cursor:pointer;}
 .i2stream-row-main{min-width:0;flex:1;}
 .i2stream-row-title{font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .i2stream-row-desc{margin-top:3px;color:var(--muted);font-size:12px;line-height:1.4;overflow-wrap:anywhere;}
@@ -6501,8 +6509,13 @@ main.main > .main-view:not([id="mainChat"]):not([id="mainSettings"]) .main-view-
   .i2stream-main-body{padding:12px;}
   .i2stream-toolbar{align-items:stretch;flex-direction:column;}
   .i2stream-toolbar .sm-btn,.i2stream-file-pick,.i2stream-action,.i2stream-load-more{min-height:44px;}
+  .i2stream-batch-actions{align-items:center;flex-wrap:wrap;}
+  .i2stream-batch-delete{width:100%;margin-left:0;}
   .i2stream-split{grid-template-columns:1fr;min-height:0;}
   .i2stream-row{align-items:flex-start;flex-direction:column;}
+  .i2stream-knowledge-row{display:grid;grid-template-columns:44px minmax(0,1fr);align-items:start;}
+  .i2stream-knowledge-row .i2stream-row-select{grid-column:1;grid-row:1 / span 2;min-height:44px;}
+  .i2stream-knowledge-row .i2stream-row-main,.i2stream-knowledge-row > .i2stream-action{grid-column:2;}
   .i2stream-row-actions{width:100%;justify-content:flex-start;}
   .i2stream-history-row{flex-direction:row;align-items:center;}
   .i2stream-report-frame{min-height:440px;}

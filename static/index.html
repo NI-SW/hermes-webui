@@ -970,6 +970,14 @@
             </label>
             <button class="sm-btn" type="submit" id="i2streamKnowledgeUploadBtn" data-i18n="i2stream_upload">Upload</button>
           </form>
+          <div class="i2stream-batch-actions" id="i2streamKnowledgeBatchActions" hidden>
+            <label class="i2stream-check" for="i2streamKnowledgeSelectAll">
+              <input id="i2streamKnowledgeSelectAll" type="checkbox" onchange="toggleI2StreamKnowledgeAll(this.checked)">
+              <span data-i18n="i2stream_select_all">Select all</span>
+            </label>
+            <span class="i2stream-selection-count" id="i2streamKnowledgeSelectionCount" aria-live="polite">0 selected</span>
+            <button class="i2stream-action danger i2stream-batch-delete" id="i2streamKnowledgeDeleteSelected" type="button" onclick="deleteSelectedI2StreamKnowledge()" disabled data-i18n="i2stream_delete_selected">Delete selected</button>
+          </div>
           <div class="i2stream-status" id="i2streamKnowledgeStatus" role="status" aria-live="polite"></div>
           <div class="i2stream-collection" id="i2streamKnowledgeList"></div>
         </section>

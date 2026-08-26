@@ -389,6 +389,8 @@ authenticated Hermes Gateway WebSocket bridge. The WebUI itself remains on
 port 8787 and proxies only its allowlisted i2Stream management routes to this
 loopback service. Browser chat keeps the WebUI's default in-process backend;
 the separately running Hermes Gateway remains dedicated to the extension bridge.
+The integrated Knowledge view supports per-file selection, select all, and a
+confirmed batch delete for clearing multiple indexed files quickly.
 
 ---
 

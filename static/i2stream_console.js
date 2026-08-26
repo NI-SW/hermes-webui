@@ -9,6 +9,8 @@ const _i2streamState = {
   section: 'knowledge',
   loaded: {knowledge: false, reports: false, history: false},
   knowledgeFiles: [],
+  selectedKnowledgeFileIds: new Set(),
+  knowledgeDeleteInFlight: false,
   reports: [],
   conversations: [],
   historyClientId: null,
@@ -116,6 +118,50 @@ function parseKnowledgeFiles(value) {
       totalChunks: item.total_chunks,
     };
   });
+}
+
+function reconcileKnowledgeSelection(files, selectedFileIds) {
+  if (!Array.isArray(files)) throw new TypeError('knowledge selection files must be an array');
+  if (Object.prototype.toString.call(selectedFileIds) !== '[object Set]') {
+    throw new TypeError('knowledge selection must be a Set');
+  }
+  return new Set(files.map(file => _i2ContractString(file.fileId, 'knowledge selection file id'))
+    .filter(fileId => selectedFileIds.has(fileId)));
+}
+
+async function _i2DeleteKnowledgeFiles(files) {
+  if (!Array.isArray(files) || files.length === 0) {
+    throw new TypeError('knowledge deletion requires at least one file');
+  }
+  const targets = files.map((raw, index) => {
+    const file = _i2ContractObject(raw, `knowledge deletion file ${index}`);
+    return {
+      fileId: _i2ContractString(file.fileId, `knowledge deletion file ${index} id`),
+      displayName: _i2ContractString(file.displayName, `knowledge deletion file ${index} display name`),
+    };
+  });
+  const results = await Promise.allSettled(targets.map(async file => {
+    _i2Success(
+      await api(`${I2STREAM_API}/knowledge/files/${encodeURIComponent(file.fileId)}`, {method: 'DELETE'}),
+      `knowledge delete ${file.fileId}`,
+    );
+    return file.fileId;
+  }));
+  const deletedFileIds = [];
+  const failures = [];
+  results.forEach((result, index) => {
+    if (result.status === 'fulfilled') {
+      deletedFileIds.push(result.value);
+      return;
+    }
+    const reason = result.reason;
+    failures.push({
+      fileId: targets[index].fileId,
+      displayName: targets[index].displayName,
+      message: reason && typeof reason.message === 'string' ? reason.message : String(reason),
+    });
+  });
+  return {deletedFileIds, failures};
 }
 
 function parseReports(value) {
@@ -276,15 +322,47 @@ async function loadI2StreamKnowledge() {
   _i2SetStatus('i2streamKnowledgeStatus', _i2Text('loading'));
   try {
     const files = parseKnowledgeFiles(await api(`${I2STREAM_API}/knowledge/files`));
-    if (generation !== _i2streamState.requestGeneration.knowledge) return;
+    if (generation !== _i2streamState.requestGeneration.knowledge) return false;
     _i2streamState.knowledgeFiles = files;
+    _i2streamState.selectedKnowledgeFileIds = reconcileKnowledgeSelection(
+      files,
+      _i2streamState.selectedKnowledgeFileIds,
+    );
     _i2streamState.loaded.knowledge = true;
     _i2RenderKnowledge();
     _i2SetStatus('i2streamKnowledgeStatus', '');
+    return true;
   } catch (error) {
-    if (generation !== _i2streamState.requestGeneration.knowledge) return;
+    if (generation !== _i2streamState.requestGeneration.knowledge) return false;
+    _i2streamState.knowledgeFiles = [];
+    _i2streamState.selectedKnowledgeFileIds = new Set();
+    _i2streamState.loaded.knowledge = false;
     _i2RenderFailure('i2streamKnowledgeList', 'i2streamKnowledgeStatus', error);
+    _i2RenderKnowledgeSelectionControls();
+    return false;
   }
+}
+
+function _i2RenderKnowledgeSelectionControls() {
+  const files = _i2streamState.knowledgeFiles;
+  const selectedCount = _i2streamState.selectedKnowledgeFileIds.size;
+  const actions = document.getElementById('i2streamKnowledgeBatchActions');
+  const selectAll = document.getElementById('i2streamKnowledgeSelectAll');
+  const count = document.getElementById('i2streamKnowledgeSelectionCount');
+  const deleteSelected = document.getElementById('i2streamKnowledgeDeleteSelected');
+  if (actions) actions.hidden = files.length === 0;
+  if (selectAll) {
+    selectAll.checked = files.length > 0 && selectedCount === files.length;
+    selectAll.indeterminate = selectedCount > 0 && selectedCount < files.length;
+    selectAll.disabled = files.length === 0 || _i2streamState.knowledgeDeleteInFlight;
+  }
+  if (count) count.textContent = _i2Text('i2stream_selected_count', selectedCount, files.length);
+  if (deleteSelected) {
+    deleteSelected.disabled = selectedCount === 0 || _i2streamState.knowledgeDeleteInFlight;
+  }
+  document.querySelectorAll('[data-i2stream-knowledge-control]').forEach(control => {
+    control.disabled = _i2streamState.knowledgeDeleteInFlight;
+  });
 }
 
 function _i2RenderKnowledge() {
@@ -292,16 +370,34 @@ function _i2RenderKnowledge() {
   if (!container) return;
   if (!_i2streamState.knowledgeFiles.length) {
     container.innerHTML = `<div class="i2stream-empty">${_i2Escape(_i2Text('i2stream_empty_knowledge'))}</div>`;
+    _i2RenderKnowledgeSelectionControls();
     return;
   }
   container.innerHTML = '';
   _i2streamState.knowledgeFiles.forEach(file => {
+    const selected = _i2streamState.selectedKnowledgeFileIds.has(file.fileId);
     const row = document.createElement('article');
-    row.className = 'i2stream-row';
-    row.innerHTML = `<div class="i2stream-row-main"><div class="i2stream-row-title">${_i2Escape(file.displayName)}</div><div class="i2stream-row-meta"><span>${_i2Escape(file.fileType || 'file')}</span><span>${_i2Escape(_i2FormatBytes(file.fileSize))}</span><span>${file.totalChunks === null ? '—' : `${file.totalChunks} chunks`}</span><span>${_i2Escape(_i2FormatDate(file.uploadTime))}</span></div></div><button type="button" class="i2stream-action danger">${_i2Escape(_i2Text('delete_title'))}</button>`;
+    row.className = `i2stream-row i2stream-knowledge-row${selected ? ' selected' : ''}`;
+    row.innerHTML = `<label class="i2stream-row-select"><input type="checkbox" data-i2stream-knowledge-control aria-label="${_i2Escape(_i2Text('i2stream_select_file', file.displayName))}"${selected ? ' checked' : ''}></label><div class="i2stream-row-main"><div class="i2stream-row-title">${_i2Escape(file.displayName)}</div><div class="i2stream-row-meta"><span>${_i2Escape(file.fileType || 'file')}</span><span>${_i2Escape(_i2FormatBytes(file.fileSize))}</span><span>${file.totalChunks === null ? '—' : `${file.totalChunks} chunks`}</span><span>${_i2Escape(_i2FormatDate(file.uploadTime))}</span></div></div><button type="button" class="i2stream-action danger" data-i2stream-knowledge-control>${_i2Escape(_i2Text('delete_title'))}</button>`;
+    const checkbox = row.querySelector('input');
+    checkbox.addEventListener('change', () => {
+      if (checkbox.checked) _i2streamState.selectedKnowledgeFileIds.add(file.fileId);
+      else _i2streamState.selectedKnowledgeFileIds.delete(file.fileId);
+      row.classList.toggle('selected', checkbox.checked);
+      _i2RenderKnowledgeSelectionControls();
+    });
     row.querySelector('button').addEventListener('click', () => deleteI2StreamKnowledge(file.fileId, file.displayName));
     container.appendChild(row);
   });
+  _i2RenderKnowledgeSelectionControls();
+}
+
+function toggleI2StreamKnowledgeAll(selected) {
+  if (_i2streamState.knowledgeDeleteInFlight || !_i2streamState.loaded.knowledge) return;
+  _i2streamState.selectedKnowledgeFileIds = selected
+    ? new Set(_i2streamState.knowledgeFiles.map(file => file.fileId))
+    : new Set();
+  _i2RenderKnowledge();
 }
 
 async function uploadI2StreamKnowledge(event) {
@@ -353,11 +449,69 @@ async function _i2WaitForKnowledgeTask(taskId, generation) {
 async function deleteI2StreamKnowledge(fileId, displayName) {
   const confirmed = await showConfirmDialog({title:`${_i2Text('delete_title')} ${displayName}?`,message:'',confirmLabel:_i2Text('delete_title'),danger:true,focusCancel:true});
   if (!confirmed) return;
+  _i2streamState.knowledgeDeleteInFlight = true;
+  _i2RenderKnowledgeSelectionControls();
   try {
-    _i2Success(await api(`${I2STREAM_API}/knowledge/files/${encodeURIComponent(fileId)}`, {method: 'DELETE'}), 'knowledge delete');
+    const deletion = await _i2DeleteKnowledgeFiles([{fileId, displayName}]);
+    if (deletion.failures.length) throw new Error(deletion.failures[0].message);
+    _i2streamState.selectedKnowledgeFileIds.delete(fileId);
     await loadI2StreamKnowledge();
   } catch (error) {
     _i2SetStatus('i2streamKnowledgeStatus', `${_i2Text('error_prefix')}${error.message}`, 'error');
+  } finally {
+    _i2streamState.knowledgeDeleteInFlight = false;
+    _i2RenderKnowledgeSelectionControls();
+  }
+}
+
+async function deleteSelectedI2StreamKnowledge() {
+  const selectedFiles = _i2streamState.knowledgeFiles.filter(file =>
+    _i2streamState.selectedKnowledgeFileIds.has(file.fileId));
+  if (!selectedFiles.length) {
+    _i2SetStatus('i2streamKnowledgeStatus', _i2Text('i2stream_no_selection'), 'error');
+    return;
+  }
+  const confirmed = await showConfirmDialog({
+    title: _i2Text('i2stream_delete_selected_confirm', selectedFiles.length),
+    message: _i2Text('i2stream_delete_selected_warning'),
+    confirmLabel: _i2Text('i2stream_delete_selected'),
+    danger: true,
+    focusCancel: true,
+  });
+  if (!confirmed) return;
+  _i2streamState.knowledgeDeleteInFlight = true;
+  _i2RenderKnowledgeSelectionControls();
+  _i2SetStatus(
+    'i2streamKnowledgeStatus',
+    _i2Text('i2stream_deleting_selected', selectedFiles.length),
+  );
+  try {
+    const deletion = await _i2DeleteKnowledgeFiles(selectedFiles);
+    deletion.deletedFileIds.forEach(fileId => _i2streamState.selectedKnowledgeFileIds.delete(fileId));
+    const refreshed = await loadI2StreamKnowledge();
+    if (!refreshed) return;
+    if (deletion.failures.length) {
+      _i2SetStatus(
+        'i2streamKnowledgeStatus',
+        _i2Text(
+          'i2stream_delete_selected_failed',
+          deletion.failures.length,
+          selectedFiles.length,
+          deletion.failures.map(failure => `${failure.displayName}: ${failure.message}`).join('; '),
+        ),
+        'error',
+      );
+      return;
+    }
+    _i2SetStatus(
+      'i2streamKnowledgeStatus',
+      _i2Text('i2stream_deleted_selected', deletion.deletedFileIds.length),
+    );
+  } catch (error) {
+    _i2SetStatus('i2streamKnowledgeStatus', `${_i2Text('error_prefix')}${error.message}`, 'error');
+  } finally {
+    _i2streamState.knowledgeDeleteInFlight = false;
+    _i2RenderKnowledgeSelectionControls();
   }
 }
 
@@ -581,6 +735,8 @@ window.__i2streamConsoleTest = {
   parseConversationPage,
   parseConversationDetail,
   parseKnowledgeFiles,
+  reconcileKnowledgeSelection,
+  deleteKnowledgeFiles: _i2DeleteKnowledgeFiles,
   parseReports,
   conversationPageUrl,
   conversationDetailUrl,

@@ -65,6 +65,15 @@ def test_i2stream_has_desktop_mobile_sidebar_and_main_surfaces():
     assert 'onsubmit="submitI2StreamHistoryClientId(event)"' in INDEX
 
 
+def test_knowledge_view_exposes_batch_selection_controls():
+    assert 'id="i2streamKnowledgeBatchActions"' in INDEX
+    assert 'id="i2streamKnowledgeSelectAll"' in INDEX
+    assert 'onchange="toggleI2StreamKnowledgeAll(this.checked)"' in INDEX
+    assert 'id="i2streamKnowledgeSelectionCount"' in INDEX
+    assert 'id="i2streamKnowledgeDeleteSelected"' in INDEX
+    assert 'onclick="deleteSelectedI2StreamKnowledge()"' in INDEX
+
+
 def test_panel_switch_wires_i2stream_into_existing_navigation_lifecycle():
     assert "i2stream: 'tab_i2stream'" in PANELS
     main_panels = re.search(r"const MAIN_VIEW_PANELS = \[([^\]]+)\];", PANELS)
@@ -114,6 +123,68 @@ output = {
             "https://example.test/hermes/api/i2stream-console/reports/"
             "abcdefghijklmnop/content"
         ),
+    }
+
+
+def test_knowledge_selection_is_reconciled_when_the_backend_list_shrinks():
+    result = _run_contract_case(
+        """
+const selected = new Set(['file-a', 'file-removed']);
+const reconciled = c.reconcileKnowledgeSelection(
+  [{fileId: 'file-a'}, {fileId: 'file-b'}],
+  selected
+);
+output = {
+  reconciled: Array.from(reconciled),
+  original: Array.from(selected),
+};
+"""
+    )
+    assert result == {
+        "reconciled": ["file-a"],
+        "original": ["file-a", "file-removed"],
+    }
+
+
+def test_knowledge_batch_delete_calls_every_selected_file_and_reports_partial_failure():
+    result = _run_contract_case(
+        """
+const calls = [];
+sandbox.api = async (url, options) => {
+  calls.push({url, method: options.method});
+  if (url.endsWith('/file-beta')) throw new Error('backend unavailable');
+  return {code: 0, status: 'success'};
+};
+const deletion = await c.deleteKnowledgeFiles([
+  {fileId: 'file-alpha', displayName: 'Alpha'},
+  {fileId: 'file-beta', displayName: 'Beta'},
+]);
+output = {
+  calls,
+  deletedFileIds: deletion.deletedFileIds,
+  failures: deletion.failures,
+};
+"""
+    )
+    assert result == {
+        "calls": [
+            {
+                "url": "/api/i2stream-console/knowledge/files/file-alpha",
+                "method": "DELETE",
+            },
+            {
+                "url": "/api/i2stream-console/knowledge/files/file-beta",
+                "method": "DELETE",
+            },
+        ],
+        "deletedFileIds": ["file-alpha"],
+        "failures": [
+            {
+                "fileId": "file-beta",
+                "displayName": "Beta",
+                "message": "backend unavailable",
+            }
+        ],
     }
 
 
@@ -194,6 +265,7 @@ def test_keyboard_theme_and_mobile_contracts_are_explicit():
     mobile = STYLE[STYLE.index("/* i2Stream Console */") :]
     assert "@media(max-width:700px)" in mobile
     assert "min-height:44px" in mobile
+    assert "grid-template-columns:44px minmax(0,1fr)" in mobile
 
 
 def test_new_module_is_loaded_and_precached_with_the_static_shell():
