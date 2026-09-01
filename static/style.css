@@ -2666,6 +2666,35 @@
   .toolsets-apply-btn:hover{opacity:.9;}
   .toolsets-clear-btn{background:transparent;color:var(--muted);border:1px solid var(--border2);}
   .toolsets-clear-btn:hover{background:var(--hover-bg);color:var(--text);}
+  /* Online nodes: quiet operational metadata. Its fixed surface lives at body
+     level so the scrollable chip row and footer container cannot clip or offset it. */
+  .online-nodes-wrap{position:relative;flex:0 0 auto;}
+  .online-nodes-button{display:inline-flex;align-items:center;gap:7px;max-width:190px;padding:8px 10px 8px 12px;border-radius:999px;border:1px solid transparent;background:transparent;color:var(--muted);font:inherit;font-weight:500;cursor:pointer;transition:color .15s,background-color .15s,border-color .15s;}
+  .online-nodes-button:hover,.online-nodes-button[aria-expanded="true"]{color:var(--text);background:var(--hover-bg);}
+  .online-nodes-button:focus-visible{outline:2px solid var(--accent);outline-offset:2px;}
+  .online-nodes-button.unavailable{color:var(--error);}
+  .online-nodes-icon,.online-nodes-chevron{display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;line-height:1;}
+  .online-nodes-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .online-nodes-dropdown{position:fixed;width:min(340px,calc(100vw - 24px));box-sizing:border-box;background:var(--surface);border:1px solid var(--border2);border-radius:10px;box-shadow:0 -4px 24px rgba(0,0,0,.4);z-index:240;padding:8px;}
+  .online-nodes-dropdown[hidden]{display:none;}
+  .online-nodes-head{display:flex;align-items:baseline;justify-content:space-between;gap:12px;padding:4px 6px 8px;border-bottom:1px solid var(--border);font-size:13px;color:var(--text);}
+  .online-nodes-head span{font-size:11px;color:var(--muted);font-weight:400;}
+  .online-nodes-body{padding-top:6px;}
+  .online-nodes-list{max-height:min(320px,50vh);overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin;}
+  .online-node-row{display:grid;grid-template-columns:9px minmax(0,1fr) auto;align-items:center;column-gap:9px;padding:8px 6px;border-radius:6px;}
+  .online-node-row+.online-node-row{border-top:1px solid var(--border);border-radius:0;}
+  .online-node-dot{width:8px;height:8px;border-radius:999px;background:var(--muted);}
+  .online-node-row.online .online-node-dot{background:var(--success);}
+  .online-node-row.offline .online-node-dot{background:var(--error);}
+  .online-node-main{min-width:0;}
+  .online-node-ip{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text);font-family:var(--font-mono,ui-monospace,SFMono-Regular,Menlo,monospace);font-size:12px;font-weight:600;}
+  .online-node-seen{margin-top:2px;color:var(--muted);font-size:11px;line-height:1.35;}
+  .online-node-state{font-size:11px;font-weight:600;}
+  .online-node-row.online .online-node-state{color:var(--success);}
+  .online-node-row.offline .online-node-state{color:var(--error);}
+  .online-nodes-message{padding:12px 8px;color:var(--muted);font-size:12px;line-height:1.45;}
+  .online-nodes-error{margin:2px 2px 6px;padding:8px;border:1px solid color-mix(in srgb,var(--error) 36%,transparent);border-radius:6px;color:var(--error);background:color-mix(in srgb,var(--error) 8%,transparent);font-size:12px;line-height:1.4;}
+  .online-nodes-error small{display:block;margin-top:3px;color:var(--muted);}
   .composer-model-chip{display:inline-flex;align-items:center;gap:8px;max-width:280px;padding:8px 10px 8px 12px;border-radius:999px;border:1px solid transparent;background-color:transparent;color:var(--muted);font-weight:500;cursor:pointer;transition:color .15s,background-color .15s,border-color .15s;}
   .composer-model-chip:hover{color:var(--text);background-color:var(--hover-bg);}
   .composer-model-chip.active{color:var(--text);background:var(--accent-bg);border-color:var(--accent-bg);}
@@ -3032,6 +3061,7 @@
   .composer-footer.cf-burger .provider-quota-chip,
   .composer-footer.cf-burger .composer-left > .composer-reasoning-wrap,
   .composer-footer.cf-burger .composer-left > .composer-toolsets-wrap{display:none!important;}
+  .composer-footer.cf-burger .composer-left > .online-nodes-wrap{display:none!important;}
   .composer-footer.cf-burger .composer-mobile-config-btn{box-sizing:border-box;position:relative;display:inline-flex!important;width:44px;height:44px;min-width:44px;min-height:44px;flex-shrink:0;}
   .composer-footer.cf-burger .composer-mobile-config-panel.open{display:flex;}
   .composer-footer.cf-burger .composer-mobile-config-action{flex:1 1 0;min-height:44px;min-width:0;background:var(--input-bg);border-color:var(--border);}
@@ -3152,6 +3182,7 @@
     .composer-left > .composer-model-wrap,
     .composer-left > .composer-reasoning-wrap,
     .composer-left > .composer-toolsets-wrap{display:none!important;}
+    .composer-left > .online-nodes-wrap{display:none!important;}
     /* Saved prompts is a desktop-only composer affordance — too much for the
        narrow mobile composer (Nathan 2026-06-09). Hide the button + popup. */
     #btnSavedPrompts,.saved-prompts-popup{display:none!important;}

@@ -1,7 +1,7 @@
 """Authenticated same-origin facade for the i2Stream compatibility service.
 
 The WebUI server remains the browser-facing security boundary.  This module
-proxies only knowledge, reports, and client-scoped conversation history;
+proxies only knowledge, reports, node status, and client-scoped conversation history;
 agent streaming and the internal gateway are intentionally not reachable.
 """
 
@@ -219,6 +219,12 @@ def resolve_proxy_target(method: str, parsed) -> ProxyTarget:
             raise ProxyRouteError("Method not allowed", status=405)
         _require_no_query(parsed)
         return ProxyTarget("/api/reports")
+
+    if suffix == "/nodes":
+        if method != "GET":
+            raise ProxyRouteError("Method not allowed", status=405)
+        _require_no_query(parsed)
+        return ProxyTarget("/api/nodes")
 
     match = re.fullmatch(r"/reports/([^/]+)/content", suffix)
     if match:

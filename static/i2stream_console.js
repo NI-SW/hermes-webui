@@ -1,8 +1,9 @@
 // Native i2Stream Console surface. The backend remains the only owner of
-// global knowledge, reports, and browser-plugin conversation history.
+// global knowledge, reports, node status, and browser-plugin conversation history.
 
 const I2STREAM_API = '/api/i2stream-console';
 const I2STREAM_HISTORY_PAGE_SIZE = 30;
+const I2STREAM_NODES_POLL_INTERVAL_MS = 30_000;
 const I2STREAM_SECTIONS = new Set(['knowledge', 'reports', 'history']);
 const I2STREAM_CLIENT_ID_RE = /^[A-Za-z0-9_-]{16,128}$/;
 const _i2streamState = {
@@ -21,6 +22,13 @@ const _i2streamState = {
   requestGeneration: {knowledge: 0, reports: 0, history: 0},
   historyDetailGeneration: 0,
   bindingsReady: false,
+  nodes: [],
+  nodesAvailable: null,
+  nodesOfflineAfterSeconds: null,
+  nodesRequestInFlight: null,
+  nodesPollTimer: null,
+  nodesFooterObserver: null,
+  nodesBindingsReady: false,
 };
 
 function _i2ContractObject(value, label) {
@@ -118,6 +126,27 @@ function parseKnowledgeFiles(value) {
       totalChunks: item.total_chunks,
     };
   });
+}
+
+function parseNodes(value) {
+  const payload = _i2ContractObject(value, 'nodes');
+  if (!Number.isInteger(payload.offline_after_seconds) || payload.offline_after_seconds < 1) {
+    throw new TypeError('nodes offline_after_seconds must be a positive integer');
+  }
+  if (!Array.isArray(payload.nodes)) throw new TypeError('nodes must be an array');
+  const nodes = payload.nodes.map((raw, index) => {
+    const item = _i2ContractObject(raw, `node ${index}`);
+    const ip = _i2ContractString(item.ip, `node ${index} ip`);
+    if (typeof item.online !== 'boolean') {
+      throw new TypeError(`node ${index} online must be a boolean`);
+    }
+    const lastSeenAt = _i2ContractString(item.last_seen_at, `node ${index} last_seen_at`);
+    if (!/(?:Z|\+00:00)$/.test(lastSeenAt) || Number.isNaN(Date.parse(lastSeenAt))) {
+      throw new TypeError(`node ${index} last_seen_at must be an ISO 8601 UTC timestamp`);
+    }
+    return {ip, online: item.online, lastSeenAt};
+  });
+  return {offlineAfterSeconds: payload.offline_after_seconds, nodes};
 }
 
 function reconcileKnowledgeSelection(files, selectedFileIds) {
@@ -223,6 +252,227 @@ function _i2FormatBytes(value) {
 function _i2FormatDate(value, seconds = false) {
   const date = new Date(seconds ? value * 1000 : value);
   return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString();
+}
+
+function _onlineNodesStateForTest() {
+  return {
+    available: _i2streamState.nodesAvailable,
+    nodes: _i2streamState.nodes.map(node => ({...node})),
+  };
+}
+
+function _renderOnlineNodes() {
+  const button = document.getElementById('onlineNodesButton');
+  const label = document.getElementById('onlineNodesLabel');
+  const threshold = document.getElementById('onlineNodesThreshold');
+  const body = document.getElementById('onlineNodesBody');
+  const available = _i2streamState.nodesAvailable;
+  const nodes = _i2streamState.nodes;
+  const onlineCount = nodes.filter(node => node.online).length;
+
+  if (label) {
+    label.textContent = available === false
+      ? _i2Text('online_nodes_unavailable_label')
+      : (available === true
+        ? _i2Text('online_nodes_count', onlineCount, nodes.length)
+        : _i2Text('online_nodes'));
+  }
+  if (button) {
+    button.classList.toggle('unavailable', available === false);
+    button.setAttribute('aria-label', label ? label.textContent : _i2Text('online_nodes'));
+  }
+  if (threshold) {
+    threshold.textContent = _i2streamState.nodesOfflineAfterSeconds === null
+      ? ''
+      : _i2Text('online_nodes_threshold', _i2streamState.nodesOfflineAfterSeconds);
+  }
+  if (!body) return;
+
+  body.replaceChildren();
+  if (available === false) {
+    const error = document.createElement('div');
+    error.className = 'online-nodes-error';
+    error.textContent = _i2Text('online_nodes_unavailable');
+    if (nodes.length) {
+      const stale = document.createElement('small');
+      stale.textContent = _i2Text('online_nodes_stale');
+      error.appendChild(stale);
+    }
+    body.appendChild(error);
+  }
+  if (available === null) {
+    const loading = document.createElement('div');
+    loading.className = 'online-nodes-message';
+    loading.textContent = _i2Text('online_nodes_loading');
+    body.appendChild(loading);
+    return;
+  }
+  if (!nodes.length) {
+    if (available === true) {
+      const empty = document.createElement('div');
+      empty.className = 'online-nodes-message';
+      empty.textContent = _i2Text('online_nodes_empty');
+      body.appendChild(empty);
+    }
+    return;
+  }
+
+  const list = document.createElement('div');
+  list.className = 'online-nodes-list';
+  list.setAttribute('role', 'list');
+  nodes.forEach(node => {
+    const row = document.createElement('div');
+    row.className = `online-node-row ${node.online ? 'online' : 'offline'}`;
+    row.setAttribute('role', 'listitem');
+
+    const dot = document.createElement('span');
+    dot.className = 'online-node-dot';
+    dot.setAttribute('aria-hidden', 'true');
+
+    const main = document.createElement('div');
+    main.className = 'online-node-main';
+    const ip = document.createElement('div');
+    ip.className = 'online-node-ip';
+    ip.textContent = node.ip;
+    ip.title = node.ip;
+    const seen = document.createElement('div');
+    seen.className = 'online-node-seen';
+    seen.textContent = _i2Text('online_nodes_last_seen', _i2FormatDate(node.lastSeenAt));
+    main.append(ip, seen);
+
+    const state = document.createElement('span');
+    state.className = 'online-node-state';
+    state.textContent = _i2Text(node.online ? 'online_nodes_online' : 'online_nodes_offline');
+    row.append(dot, main, state);
+    list.appendChild(row);
+  });
+  body.appendChild(list);
+}
+
+async function loadOnlineNodes() {
+  if (_i2streamState.nodesRequestInFlight !== null) {
+    return _i2streamState.nodesRequestInFlight;
+  }
+  if (_i2streamState.nodesAvailable === null) _renderOnlineNodes();
+  const request = (async () => {
+    try {
+      const snapshot = parseNodes(await api(`${I2STREAM_API}/nodes`));
+      _i2streamState.nodes = snapshot.nodes;
+      _i2streamState.nodesOfflineAfterSeconds = snapshot.offlineAfterSeconds;
+      _i2streamState.nodesAvailable = true;
+      _renderOnlineNodes();
+      return true;
+    } catch {
+      // Availability belongs to this request. The last successful node snapshot
+      // remains untouched so a transport failure cannot manufacture offline nodes.
+      _i2streamState.nodesAvailable = false;
+      _renderOnlineNodes();
+      return false;
+    }
+  })();
+  _i2streamState.nodesRequestInFlight = request;
+  try {
+    return await request;
+  } finally {
+    if (_i2streamState.nodesRequestInFlight === request) {
+      _i2streamState.nodesRequestInFlight = null;
+    }
+  }
+}
+
+function _positionOnlineNodesDropdown() {
+  const button = document.getElementById('onlineNodesButton');
+  const dropdown = document.getElementById('onlineNodesDropdown');
+  if (!button || !dropdown || dropdown.hidden) return;
+  if (button.offsetParent === null) {
+    closeOnlineNodesDropdown();
+    return;
+  }
+  const anchor = button.getBoundingClientRect();
+  const width = dropdown.offsetWidth;
+  const height = dropdown.offsetHeight;
+  const left = Math.min(
+    Math.max(8, anchor.left),
+    Math.max(8, window.innerWidth - width - 8),
+  );
+  const top = height + 6 <= anchor.top
+    ? anchor.top - height - 6
+    : Math.min(window.innerHeight - height - 8, anchor.bottom + 6);
+  dropdown.style.left = `${left}px`;
+  dropdown.style.top = `${Math.max(8, top)}px`;
+}
+
+function closeOnlineNodesDropdown(restoreFocus = false) {
+  const button = document.getElementById('onlineNodesButton');
+  const dropdown = document.getElementById('onlineNodesDropdown');
+  if (!button || !dropdown || dropdown.hidden) return;
+  dropdown.hidden = true;
+  button.setAttribute('aria-expanded', 'false');
+  if (restoreFocus) button.focus();
+}
+
+function toggleOnlineNodesDropdown() {
+  const button = document.getElementById('onlineNodesButton');
+  const dropdown = document.getElementById('onlineNodesDropdown');
+  if (!button || !dropdown) return;
+  if (button.offsetParent === null) {
+    closeOnlineNodesDropdown();
+    return;
+  }
+  if (!dropdown.hidden) {
+    closeOnlineNodesDropdown();
+    return;
+  }
+  if (typeof closeProfileDropdown === 'function') closeProfileDropdown();
+  if (typeof closeWsDropdown === 'function') closeWsDropdown();
+  if (typeof closeModelDropdown === 'function') closeModelDropdown();
+  if (typeof closeReasoningDropdown === 'function') closeReasoningDropdown();
+  if (typeof closeToolsetsDropdown === 'function') closeToolsetsDropdown();
+  dropdown.hidden = false;
+  button.setAttribute('aria-expanded', 'true');
+  _renderOnlineNodes();
+  _positionOnlineNodesDropdown();
+  void loadOnlineNodes();
+}
+
+function _stopOnlineNodesPolling() {
+  if (_i2streamState.nodesPollTimer === null) return;
+  clearInterval(_i2streamState.nodesPollTimer);
+  _i2streamState.nodesPollTimer = null;
+}
+
+function startOnlineNodesPolling() {
+  _stopOnlineNodesPolling();
+  if (document.visibilityState !== 'visible') return;
+  void loadOnlineNodes();
+  _i2streamState.nodesPollTimer = setInterval(() => {
+    if (document.visibilityState === 'visible') void loadOnlineNodes();
+  }, I2STREAM_NODES_POLL_INTERVAL_MS);
+}
+
+function _bindOnlineNodes() {
+  if (_i2streamState.nodesBindingsReady) return;
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') startOnlineNodesPolling();
+    else _stopOnlineNodesPolling();
+  });
+  document.addEventListener('keydown', event => {
+    if (event.key === 'Escape') closeOnlineNodesDropdown(true);
+  });
+  document.addEventListener('click', event => {
+    const button = document.getElementById('onlineNodesButton');
+    const onlineNodesDropdown = document.getElementById('onlineNodesDropdown');
+    if (!button || !onlineNodesDropdown || onlineNodesDropdown.hidden) return;
+    if (button.contains(event.target) || onlineNodesDropdown.contains(event.target)) return;
+    closeOnlineNodesDropdown();
+  });
+  window.addEventListener('resize', _positionOnlineNodesDropdown);
+  const footer = document.querySelector('.composer-footer');
+  if (footer && typeof MutationObserver === 'function') {
+    _i2streamState.nodesFooterObserver = new MutationObserver(_positionOnlineNodesDropdown);
+    _i2streamState.nodesFooterObserver.observe(footer, {attributes: true, attributeFilter: ['class']});
+  }
+  _i2streamState.nodesBindingsReady = true;
 }
 
 function _i2SetStatus(id, message, kind = '') {
@@ -740,6 +990,9 @@ window.__i2streamConsoleTest = {
   parseReports,
   conversationPageUrl,
   conversationDetailUrl,
+  parseNodes,
+  loadOnlineNodes,
+  getOnlineNodesState: _onlineNodesStateForTest,
   loadI2StreamHistory,
   resolveI2StreamBrowserUrl,
 };
@@ -747,6 +1000,9 @@ window.__i2streamConsoleTest = {
 // i2Stream links are additive query parameters, so existing session path/query
 // routing remains intact. Invalid views deliberately fall back to Knowledge.
 if (typeof document !== 'undefined') document.addEventListener('DOMContentLoaded', () => {
+  _bindOnlineNodes();
+  _renderOnlineNodes();
+  startOnlineNodesPolling();
   const query = new URLSearchParams(window.location.search || '');
   if (query.get('panel') !== 'i2stream') return;
   const requestedView = query.get('view');

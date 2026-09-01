@@ -3,7 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from node_store import normalize_node_ip
 
 
 class ChatMessage(BaseModel):
@@ -66,6 +68,17 @@ class DashboardRunRequest(BaseModel):
 
 class MessageFeedbackRequest(BaseModel):
     feedback: Literal["like", "dislike"]
+
+
+class HeartbeatRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    ip: str
+
+    @field_validator("ip")
+    @classmethod
+    def validate_ip(cls, value: str) -> str:
+        return normalize_node_ip(value)
 
 
 class FileRecord(BaseModel):

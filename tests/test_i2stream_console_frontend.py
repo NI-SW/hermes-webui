@@ -273,3 +273,149 @@ def test_new_module_is_loaded_and_precached_with_the_static_shell():
     assert f'<script src="{script}" defer></script>' in INDEX
     assert "'./static/i2stream_console.js' + VQ" in SW
     assert "'./static/i2.ico' + VQ" in SW
+
+
+def test_online_nodes_control_uses_an_external_accessible_surface():
+    toolsets = INDEX.index('id="composerToolsetsWrap"')
+    trigger = INDEX.index('id="onlineNodesButton"')
+    composer_left_end = INDEX.index('</div>', INDEX.index('</div>', toolsets) + 6)
+    surface = INDEX.index('id="onlineNodesDropdown"')
+    toast = INDEX.index('id="toast"')
+
+    assert toolsets < trigger < composer_left_end < toast < surface
+    assert 'aria-haspopup="dialog"' in INDEX[trigger : trigger + 500]
+    assert 'aria-expanded="false"' in INDEX[trigger : trigger + 500]
+    assert 'aria-controls="onlineNodesDropdown"' in INDEX[trigger : trigger + 500]
+    assert 'role="dialog"' in INDEX[surface : surface + 500]
+    assert 'aria-live="polite"' in INDEX[surface : surface + 500]
+
+
+def test_online_nodes_contract_parser_preserves_online_and_offline_records():
+    result = _run_contract_case(
+        """
+const snapshot = c.parseNodes({
+  offline_after_seconds: 90,
+  nodes: [
+    {ip: '10.1.1.10', online: true, last_seen_at: '2026-08-31T10:20:30Z'},
+    {ip: '10.1.1.11', online: false, last_seen_at: '2026-08-31T10:18:00Z'}
+  ]
+});
+output = snapshot;
+"""
+    )
+    assert result == {
+        "offlineAfterSeconds": 90,
+        "nodes": [
+            {
+                "ip": "10.1.1.10",
+                "online": True,
+                "lastSeenAt": "2026-08-31T10:20:30Z",
+            },
+            {
+                "ip": "10.1.1.11",
+                "online": False,
+                "lastSeenAt": "2026-08-31T10:18:00Z",
+            },
+        ],
+    }
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "c.parseNodes({offline_after_seconds:90,nodes:{}})",
+        "c.parseNodes({offline_after_seconds:0,nodes:[]})",
+        "c.parseNodes({offline_after_seconds:90,nodes:[{ip:'',online:true,last_seen_at:'2026-08-31T10:20:30Z'}]})",
+        "c.parseNodes({offline_after_seconds:90,nodes:[{ip:'10.1.1.10',online:'yes',last_seen_at:'2026-08-31T10:20:30Z'}]})",
+        "c.parseNodes({offline_after_seconds:90,nodes:[{ip:'10.1.1.10',online:true,last_seen_at:'not-a-date'}]})",
+    ],
+)
+def test_online_nodes_contract_rejects_malformed_payloads(expression):
+    result = _run_contract_case(
+        f"""
+try {{ {expression}; output = {{threw: false}}; }}
+catch (error) {{ output = {{threw: true, name: error.name}}; }}
+"""
+    )
+    assert result == {"threw": True, "name": "TypeError"}
+
+
+def test_online_nodes_request_failure_keeps_last_successful_node_statuses():
+    result = _run_contract_case(
+        """
+let fail = false;
+sandbox.api = async () => {
+  if (fail) throw new Error('backend unavailable');
+  return {
+    offline_after_seconds: 90,
+    nodes: [
+      {ip: '10.1.1.10', online: true, last_seen_at: '2026-08-31T10:20:30Z'},
+      {ip: '10.1.1.11', online: false, last_seen_at: '2026-08-31T10:18:00Z'}
+    ]
+  };
+};
+await c.loadOnlineNodes();
+fail = true;
+await c.loadOnlineNodes();
+output = c.getOnlineNodesState();
+"""
+    )
+    assert result == {
+        "available": False,
+        "nodes": [
+            {"ip": "10.1.1.10", "online": True, "lastSeenAt": "2026-08-31T10:20:30Z"},
+            {"ip": "10.1.1.11", "online": False, "lastSeenAt": "2026-08-31T10:18:00Z"},
+        ],
+    }
+
+
+def test_online_nodes_reuses_the_inflight_request_instead_of_stacking_polls():
+    result = _run_contract_case(
+        """
+let calls = 0;
+let resolveRequest;
+sandbox.api = async () => {
+  calls += 1;
+  return await new Promise(resolve => { resolveRequest = resolve; });
+};
+const first = c.loadOnlineNodes();
+const second = c.loadOnlineNodes();
+await Promise.resolve();
+const callsWhilePending = calls;
+resolveRequest({
+  offline_after_seconds: 90,
+  nodes: [{ip: '10.1.1.10', online: true, last_seen_at: '2026-08-31T10:20:30Z'}]
+});
+await Promise.all([first, second]);
+output = {callsWhilePending, calls, state: c.getOnlineNodesState()};
+"""
+    )
+    assert result == {
+        "callsWhilePending": 1,
+        "calls": 1,
+        "state": {
+            "available": True,
+            "nodes": [
+                {"ip": "10.1.1.10", "online": True, "lastSeenAt": "2026-08-31T10:20:30Z"}
+            ],
+        },
+    }
+
+
+def test_online_nodes_lifecycle_has_visibility_polling_and_accessible_close_paths():
+    source = MODULE_PATH.read_text(encoding="utf-8")
+    assert "const I2STREAM_NODES_POLL_INTERVAL_MS = 30_000" in source
+    assert "visibilitychange" in source
+    assert "document.visibilityState === 'visible'" in source
+    assert "event.key === 'Escape'" in source
+    assert "onlineNodesDropdown.contains(event.target)" in source
+    assert "button.offsetParent === null" in source
+    assert "closeModelDropdown" in source
+    assert "closeReasoningDropdown" in source
+    assert "closeToolsetsDropdown" in source
+    assert "closeProfileDropdown" in source
+    assert "closeWsDropdown" in source
+    assert "MutationObserver" in source
+    assert ".online-nodes-list{max-height:" in STYLE
+    assert ".composer-footer.cf-burger .composer-left > .online-nodes-wrap" in STYLE
+    assert ".composer-left > .online-nodes-wrap{display:none!important;}" in STYLE

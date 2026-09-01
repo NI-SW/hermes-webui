@@ -724,6 +724,13 @@
                 <span class="composer-toolsets-chevron" aria-hidden="true"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></span>
               </button>
             </div>
+            <div class="online-nodes-wrap">
+              <button class="online-nodes-button" id="onlineNodesButton" type="button" onclick="toggleOnlineNodesDropdown()" aria-haspopup="dialog" aria-expanded="false" aria-controls="onlineNodesDropdown" data-i18n-title="online_nodes" title="Online nodes">
+                <span class="online-nodes-icon" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="5" r="2.5"/><circle cx="5" cy="18" r="2.5"/><circle cx="19" cy="18" r="2.5"/><path d="M10.6 7.1 6.4 15.8M13.4 7.1l4.2 8.7M7.5 18h9"/></svg></span>
+                <span class="online-nodes-label" id="onlineNodesLabel" data-i18n="online_nodes">Online nodes</span>
+                <span class="online-nodes-chevron" aria-hidden="true"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></span>
+              </button>
+            </div>
           </div>
           <div id="savedPromptsPopup" class="saved-prompts-popup" style="display:none" role="menu" aria-label="Saved prompts" data-i18n-aria-label="composer_control_saved_prompts"></div>
           <div class="composer-right">
@@ -1857,6 +1864,13 @@
   </div>
 </div>
 <div class="toast" id="toast"></div>
+<section class="online-nodes-dropdown" id="onlineNodesDropdown" role="dialog" aria-labelledby="onlineNodesLabel" hidden>
+  <div class="online-nodes-head">
+    <strong data-i18n="online_nodes">Online nodes</strong>
+    <span id="onlineNodesThreshold"></span>
+  </div>
+  <div class="online-nodes-body" id="onlineNodesBody" aria-live="polite"></div>
+</section>
 <script src="static/i18n.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/icons.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/assistant_turn_anchors.js?v=__WEBUI_VERSION__" defer></script>

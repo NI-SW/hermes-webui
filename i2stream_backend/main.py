@@ -7,6 +7,7 @@ import os
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
+from datetime import datetime, timezone
 from typing import Annotated, Any
 
 from fastapi import (
@@ -102,8 +103,10 @@ from models import (
     DashboardRunRequest,
     DashboardSessionCreateRequest,
     DashboardSessionUpdateRequest,
+    HeartbeatRequest,
     MessageFeedbackRequest,
 )
+from node_store import OFFLINE_AFTER_SECONDS, list_nodes, record_heartbeat
 from progress import (
     append_progress,
     finish_progress,
@@ -170,6 +173,10 @@ dashboard_agent_service = DashboardAgentService(
     session_store=SQLiteDashboardSessionStore(),
 )
 dashboard_anonymous_identity = DashboardAnonymousIdentity(settings.session_hmac_secret)
+
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 async def dashboard_user_id(request: Request) -> str:
@@ -460,6 +467,20 @@ async def health() -> dict[str, Any]:
         "file_store_dir": str(settings.file_store_dir),
         "inbox_file_store_dir": str(settings.inbox_file_store_dir),
         "gateway_bridge_connected": gateway_bridge.connected,
+    }
+
+
+@app.post("/api/heartbeat", status_code=204)
+async def heartbeat(payload: HeartbeatRequest) -> Response:
+    record_heartbeat(payload.ip, utc_now())
+    return Response(status_code=204)
+
+
+@app.get("/api/nodes")
+async def nodes() -> dict[str, Any]:
+    return {
+        "offline_after_seconds": OFFLINE_AFTER_SECONDS,
+        "nodes": list_nodes(utc_now()),
     }
 
 

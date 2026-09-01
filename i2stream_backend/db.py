@@ -87,6 +87,14 @@ CHAT_SCHEMA_STATEMENTS = (
         CHECK (LENGTH(TRIM(session_id)) > 0)
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS node_heartbeats (
+        ip TEXT NOT NULL PRIMARY KEY,
+        last_seen_at TEXT NOT NULL,
+        CHECK (LENGTH(TRIM(ip)) > 0),
+        CHECK (LENGTH(TRIM(last_seen_at)) > 0)
+    )
+    """,
 )
 
 CHAT_SCHEMA_INDEX_STATEMENTS = (
