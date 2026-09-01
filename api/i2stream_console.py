@@ -11,6 +11,7 @@ import logging
 import re
 from contextlib import closing
 from dataclasses import dataclass
+from ipaddress import ip_address
 from urllib.error import HTTPError, URLError
 from urllib.parse import (
     parse_qs,
@@ -225,6 +226,21 @@ def resolve_proxy_target(method: str, parsed) -> ProxyTarget:
             raise ProxyRouteError("Method not allowed", status=405)
         _require_no_query(parsed)
         return ProxyTarget("/api/nodes")
+
+    match = re.fullmatch(r"/nodes/([^/]+)", suffix)
+    if match:
+        if method != "DELETE":
+            raise ProxyRouteError("Method not allowed", status=405)
+        _require_no_query(parsed)
+        encoded_ip = _decode_path_segment(match.group(1), "node IP", max_length=64)
+        node_ip = unquote_to_bytes(encoded_ip).decode("utf-8")
+        if "%" in node_ip:
+            raise ProxyRouteError("Invalid node IP")
+        try:
+            canonical_ip = str(ip_address(node_ip))
+        except ValueError:
+            raise ProxyRouteError("Invalid node IP") from None
+        return ProxyTarget(f"/api/nodes/{quote(canonical_ip, safe='')}")
 
     match = re.fullmatch(r"/reports/([^/]+)/content", suffix)
     if match:

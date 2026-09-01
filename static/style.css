@@ -6508,6 +6508,7 @@ main.main > .main-view:not([id="mainChat"]):not([id="mainSettings"]) .main-view-
 .i2stream-batch-delete{margin-left:auto;}
 .i2stream-status{min-height:20px;color:var(--muted);font-size:12px;line-height:1.5;}
 .i2stream-status[data-kind="error"],.i2stream-error{color:var(--error);}
+.i2stream-node-summary{margin-bottom:10px;padding:9px 12px;border-left:3px solid var(--accent);border-radius:0 8px 8px 0;background:var(--accent-bg);color:var(--accent-text);font-size:12px;font-weight:600;line-height:1.4;}
 .i2stream-collection{display:flex;flex-direction:column;gap:8px;min-width:0;}
 .i2stream-row{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;padding:11px 12px;border:1px solid var(--border);border-radius:10px;background:var(--surface);color:var(--text);text-align:left;}
 .i2stream-row.selectable,.i2stream-history-row{cursor:pointer;}
@@ -6522,6 +6523,16 @@ main.main > .main-view:not([id="mainChat"]):not([id="mainSettings"]) .main-view-
 .i2stream-action{display:inline-flex;align-items:center;justify-content:center;min-height:30px;padding:4px 8px;border:1px solid var(--border);border-radius:7px;background:var(--bg);color:var(--text);font:inherit;font-size:11px;text-decoration:none;cursor:pointer;}
 .i2stream-action:hover{border-color:var(--accent);color:var(--accent-text);}
 .i2stream-action.danger{color:var(--error);}
+.i2stream-node-management-row{position:relative;display:grid;grid-template-columns:minmax(0,1fr) auto;padding-left:15px;overflow:hidden;}
+.i2stream-node-status-rail{position:absolute;inset:0 auto 0 0;width:4px;background:var(--muted);}
+.i2stream-node-management-row.online .i2stream-node-status-rail{background:var(--success);}
+.i2stream-node-management-row.offline .i2stream-node-status-rail{background:var(--error);}
+.i2stream-node-title-line{display:flex;align-items:center;gap:9px;min-width:0;}
+.i2stream-node-address{font-family:var(--font-mono,ui-monospace,SFMono-Regular,Menlo,monospace);}
+.i2stream-node-state{display:inline-flex;align-items:center;flex:none;padding:2px 7px;border-radius:999px;font-size:10px;font-weight:700;}
+.i2stream-node-state.online{background:color-mix(in srgb,var(--success) 14%,transparent);color:var(--success);}
+.i2stream-node-state.offline{background:color-mix(in srgb,var(--error) 12%,transparent);color:var(--error);}
+.i2stream-node-times{display:grid;grid-template-columns:repeat(2,minmax(220px,1fr));}
 .i2stream-empty{display:flex;align-items:center;justify-content:center;min-height:150px;padding:24px;border:1px dashed var(--border);border-radius:10px;color:var(--muted);font-size:12px;text-align:center;}
 .i2stream-split{display:grid;grid-template-columns:minmax(260px,.75fr) minmax(0,1.25fr);gap:14px;min-height:420px;}
 .i2stream-preview,.i2stream-history-detail{min-width:0;border:1px solid var(--border);border-radius:10px;background:var(--surface);overflow:hidden;}
@@ -6552,6 +6563,9 @@ main.main > .main-view:not([id="mainChat"]):not([id="mainSettings"]) .main-view-
   .i2stream-knowledge-row .i2stream-row-main,.i2stream-knowledge-row > .i2stream-action{grid-column:2;}
   .i2stream-row-actions{width:100%;justify-content:flex-start;}
   .i2stream-history-row{flex-direction:row;align-items:center;}
+  .i2stream-node-management-row{grid-template-columns:minmax(0,1fr);}
+  .i2stream-node-management-row > .i2stream-action{grid-column:1;width:100%;min-height:44px;}
+  .i2stream-node-times{grid-template-columns:1fr;}
   .i2stream-report-frame{min-height:440px;}
   .i2stream-message-list{max-height:none;}
 }

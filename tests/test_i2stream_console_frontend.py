@@ -30,7 +30,7 @@ const document = {{
   querySelectorAll: () => [],
   addEventListener: () => {{}},
 }};
-const sandbox = {{ window: {{}}, URL, URLSearchParams, console, document }};
+const sandbox = {{ window: {{}}, URL, URLSearchParams, console, document, setTimeout }};
 vm.createContext(sandbox);
 vm.runInContext(source, sandbox);
 const c = sandbox.window.__i2streamConsoleTest;
@@ -56,13 +56,26 @@ def test_i2stream_has_desktop_mobile_sidebar_and_main_surfaces():
     assert INDEX.count('src="static/i2.ico?v=__WEBUI_VERSION__"') == 2
     assert 'id="panelI2stream"' in INDEX
     assert 'id="mainI2stream"' in INDEX
-    for section in ("knowledge", "reports", "history"):
+    for section in ("knowledge", "reports", "history", "nodes"):
         assert f'data-i2stream-section="{section}"' in INDEX
     assert 'id="i2streamKnowledgeUpload"' in INDEX
     assert 'id="i2streamMainContent"' in INDEX
     assert 'data-i2stream-scope="global"' in INDEX
     assert 'id="i2streamHistoryClientId"' in INDEX
     assert 'onsubmit="submitI2StreamHistoryClientId(event)"' in INDEX
+    assert 'id="i2streamNodesList"' in INDEX
+    assert 'id="i2streamNodesStatus"' in INDEX
+    for section in ("Knowledge", "Reports", "History", "Nodes"):
+        assert f'id="i2stream{section}Tab"' in INDEX
+        assert f'aria-controls="i2stream{section}Page"' in INDEX
+        assert f'id="i2stream{section}Page" role="tabpanel"' in INDEX
+        assert f'aria-labelledby="i2stream{section}Tab"' in INDEX
+    assert 'id="i2streamKnowledgeTab" role="tab" tabindex="0"' in INDEX
+    for section in ("Reports", "History", "Nodes"):
+        assert f'id="i2stream{section}Tab" role="tab" tabindex="-1"' in INDEX
+    source = MODULE_PATH.read_text(encoding="utf-8")
+    for key in ("ArrowRight", "ArrowDown", "ArrowLeft", "ArrowUp", "Home", "End"):
+        assert f"event.key === '{key}'" in source
 
 
 def test_knowledge_view_exposes_batch_selection_controls():
@@ -233,13 +246,14 @@ def test_i2stream_module_uses_only_same_origin_console_api_contract():
         "/knowledge/tasks/",
         "/reports",
         "/conversations",
+        "/nodes",
     ):
         assert route in source
     assert "FormData" in source
     assert "method: 'DELETE'" in source
     assert "client_id:" in source
     assert "input.files[0].size > MAX_UPLOAD_BYTES" in source
-    assert "requestGeneration: {knowledge: 0, reports: 0, history: 0}" in source
+    assert "requestGeneration: {knowledge: 0, reports: 0, history: 0, nodes: 0}" in source
     assert "historyDetailGeneration" in source
     assert source.count("generation !== _i2streamState.historyDetailGeneration") == 2
 
@@ -296,8 +310,8 @@ def test_online_nodes_contract_parser_preserves_online_and_offline_records():
 const snapshot = c.parseNodes({
   offline_after_seconds: 90,
   nodes: [
-    {ip: '10.1.1.10', online: true, last_seen_at: '2026-08-31T10:20:30Z'},
-    {ip: '10.1.1.11', online: false, last_seen_at: '2026-08-31T10:18:00Z'}
+    {ip: '10.1.1.10', online: true, first_seen_at: '2026-08-01T08:00:00Z', last_seen_at: '2026-08-31T10:20:30Z'},
+    {ip: '10.1.1.11', online: false, first_seen_at: '2026-08-02T09:00:00Z', last_seen_at: '2026-08-31T10:18:00Z'}
   ]
 });
 output = snapshot;
@@ -309,11 +323,13 @@ output = snapshot;
             {
                 "ip": "10.1.1.10",
                 "online": True,
+                "firstSeenAt": "2026-08-01T08:00:00Z",
                 "lastSeenAt": "2026-08-31T10:20:30Z",
             },
             {
                 "ip": "10.1.1.11",
                 "online": False,
+                "firstSeenAt": "2026-08-02T09:00:00Z",
                 "lastSeenAt": "2026-08-31T10:18:00Z",
             },
         ],
@@ -325,9 +341,12 @@ output = snapshot;
     [
         "c.parseNodes({offline_after_seconds:90,nodes:{}})",
         "c.parseNodes({offline_after_seconds:0,nodes:[]})",
-        "c.parseNodes({offline_after_seconds:90,nodes:[{ip:'',online:true,last_seen_at:'2026-08-31T10:20:30Z'}]})",
-        "c.parseNodes({offline_after_seconds:90,nodes:[{ip:'10.1.1.10',online:'yes',last_seen_at:'2026-08-31T10:20:30Z'}]})",
-        "c.parseNodes({offline_after_seconds:90,nodes:[{ip:'10.1.1.10',online:true,last_seen_at:'not-a-date'}]})",
+        "c.parseNodes({offline_after_seconds:90,nodes:[{ip:'',online:true,first_seen_at:'2026-08-01T10:20:30Z',last_seen_at:'2026-08-31T10:20:30Z'}]})",
+        "c.parseNodes({offline_after_seconds:90,nodes:[{ip:'10.1.1.10',online:'yes',first_seen_at:'2026-08-01T10:20:30Z',last_seen_at:'2026-08-31T10:20:30Z'}]})",
+        "c.parseNodes({offline_after_seconds:90,nodes:[{ip:'10.1.1.10',online:true,first_seen_at:'2026-08-01T10:20:30Z',last_seen_at:'not-a-date'}]})",
+        "c.parseNodes({offline_after_seconds:90,nodes:[{ip:'10.1.1.10',online:true,first_seen_at:'not-a-date',last_seen_at:'2026-08-31T10:20:30Z'}]})",
+        "c.parseNodes({offline_after_seconds:90,nodes:[{ip:'10.1.1.10',online:true,last_seen_at:'2026-08-31T10:20:30Z'}]})",
+        "c.parseNodes({offline_after_seconds:90,nodes:[{ip:'10.1.1.10',online:true,first_seen_at:'2026-09-01T10:20:30Z',last_seen_at:'2026-08-31T10:20:30Z'}]})",
     ],
 )
 def test_online_nodes_contract_rejects_malformed_payloads(expression):
@@ -349,8 +368,8 @@ sandbox.api = async () => {
   return {
     offline_after_seconds: 90,
     nodes: [
-      {ip: '10.1.1.10', online: true, last_seen_at: '2026-08-31T10:20:30Z'},
-      {ip: '10.1.1.11', online: false, last_seen_at: '2026-08-31T10:18:00Z'}
+      {ip: '10.1.1.10', online: true, first_seen_at: '2026-08-01T08:00:00Z', last_seen_at: '2026-08-31T10:20:30Z'},
+      {ip: '10.1.1.11', online: false, first_seen_at: '2026-08-02T09:00:00Z', last_seen_at: '2026-08-31T10:18:00Z'}
     ]
   };
 };
@@ -363,8 +382,8 @@ output = c.getOnlineNodesState();
     assert result == {
         "available": False,
         "nodes": [
-            {"ip": "10.1.1.10", "online": True, "lastSeenAt": "2026-08-31T10:20:30Z"},
-            {"ip": "10.1.1.11", "online": False, "lastSeenAt": "2026-08-31T10:18:00Z"},
+            {"ip": "10.1.1.10", "online": True, "firstSeenAt": "2026-08-01T08:00:00Z", "lastSeenAt": "2026-08-31T10:20:30Z"},
+            {"ip": "10.1.1.11", "online": False, "firstSeenAt": "2026-08-02T09:00:00Z", "lastSeenAt": "2026-08-31T10:18:00Z"},
         ],
     }
 
@@ -384,7 +403,7 @@ await Promise.resolve();
 const callsWhilePending = calls;
 resolveRequest({
   offline_after_seconds: 90,
-  nodes: [{ip: '10.1.1.10', online: true, last_seen_at: '2026-08-31T10:20:30Z'}]
+  nodes: [{ip: '10.1.1.10', online: true, first_seen_at: '2026-08-01T08:00:00Z', last_seen_at: '2026-08-31T10:20:30Z'}]
 });
 await Promise.all([first, second]);
 output = {callsWhilePending, calls, state: c.getOnlineNodesState()};
@@ -396,9 +415,145 @@ output = {callsWhilePending, calls, state: c.getOnlineNodesState()};
         "state": {
             "available": True,
             "nodes": [
-                {"ip": "10.1.1.10", "online": True, "lastSeenAt": "2026-08-31T10:20:30Z"}
+                {"ip": "10.1.1.10", "online": True, "firstSeenAt": "2026-08-01T08:00:00Z", "lastSeenAt": "2026-08-31T10:20:30Z"}
             ],
         },
+    }
+
+
+def test_node_deletion_request_encodes_ipv6_and_uses_delete():
+    result = _run_contract_case(
+        """
+const calls = [];
+sandbox.api = async (url, options) => { calls.push({url, options}); };
+await c.deleteNodeRequest('2001:db8::1');
+output = calls;
+"""
+    )
+    assert result == [
+        {
+            "url": "/api/i2stream-console/nodes/2001%3Adb8%3A%3A1",
+            "options": {"method": "DELETE"},
+        }
+    ]
+
+
+def test_confirmed_node_deletion_refreshes_and_removes_the_node_snapshot():
+    result = _run_contract_case(
+        """
+const calls = [];
+let deleted = false;
+let confirmations = 0;
+sandbox.showConfirmDialog = async () => { confirmations += 1; return true; };
+sandbox.api = async (url, options = {}) => {
+  calls.push({url, method: options.method || 'GET'});
+  if (options.method === 'DELETE') { deleted = true; return null; }
+  return {
+    offline_after_seconds: 90,
+    nodes: deleted ? [] : [
+      {ip: '10.1.1.10', online: true, first_seen_at: '2026-08-01T08:00:00Z', last_seen_at: '2026-08-31T10:20:30Z'}
+    ]
+  };
+};
+await c.loadOnlineNodes();
+await c.deleteI2StreamNode('10.1.1.10');
+output = {confirmations, calls, state: c.getOnlineNodesState()};
+"""
+    )
+    assert result == {
+        "confirmations": 1,
+        "calls": [
+            {"url": "/api/i2stream-console/nodes", "method": "GET"},
+            {"url": "/api/i2stream-console/nodes/10.1.1.10", "method": "DELETE"},
+            {"url": "/api/i2stream-console/nodes", "method": "GET"},
+        ],
+        "state": {"available": True, "nodes": []},
+    }
+
+
+def test_concurrent_node_poll_does_not_report_successful_delete_as_refresh_failure():
+    result = _run_contract_case(
+        """
+const status = {textContent: '', dataset: {}, focus: () => {}};
+sandbox.document.getElementById = id => id === 'i2streamNodesStatus' ? status : null;
+let deleted = false;
+let signalRefreshStarted;
+let finishRefresh;
+const refreshStarted = new Promise(resolve => { signalRefreshStarted = resolve; });
+const refreshResponse = new Promise(resolve => { finishRefresh = resolve; });
+sandbox.showConfirmDialog = async () => true;
+sandbox.api = async (url, options = {}) => {
+  if (options.method === 'DELETE') { deleted = true; return null; }
+  if (deleted) { signalRefreshStarted(); return refreshResponse; }
+  return {
+    offline_after_seconds: 90,
+    nodes: [
+      {ip: '10.1.1.10', online: true, first_seen_at: '2026-08-01T08:00:00Z', last_seen_at: '2026-08-31T10:20:30Z'}
+    ]
+  };
+};
+await c.loadOnlineNodes();
+const deletion = c.deleteI2StreamNode('10.1.1.10');
+await refreshStarted;
+const poll = c.loadI2StreamNodes(false);
+finishRefresh({offline_after_seconds: 90, nodes: []});
+await Promise.all([deletion, poll]);
+output = {message: status.textContent, state: c.getOnlineNodesState()};
+"""
+    )
+    assert result == {
+        "message": "i2stream_node_deleted",
+        "state": {"available": True, "nodes": []},
+    }
+
+
+@pytest.mark.parametrize(
+    ("confirmation", "delete_fails", "refresh_fails", "expected_calls", "available"),
+    [
+        (False, False, False, 1, True),
+        (True, True, False, 2, True),
+        (True, False, True, 3, False),
+    ],
+)
+def test_node_deletion_cancel_and_failure_paths_preserve_truthful_state(
+    confirmation, delete_fails, refresh_fails, expected_calls, available
+):
+    result = _run_contract_case(
+        f"""
+let calls = 0;
+let deleted = false;
+sandbox.showConfirmDialog = async () => {str(confirmation).lower()};
+sandbox.api = async (url, options = {{}}) => {{
+  calls += 1;
+  if (options.method === 'DELETE') {{
+    if ({str(delete_fails).lower()}) throw new Error('delete failed');
+    deleted = true;
+    return null;
+  }}
+  if (deleted && {str(refresh_fails).lower()}) throw new Error('refresh failed');
+  return {{
+    offline_after_seconds: 90,
+    nodes: deleted ? [] : [
+      {{ip: '10.1.1.10', online: true, first_seen_at: '2026-08-01T08:00:00Z', last_seen_at: '2026-08-31T10:20:30Z'}}
+    ]
+  }};
+}};
+await c.loadOnlineNodes();
+await c.deleteI2StreamNode('10.1.1.10');
+output = {{calls, state: c.getOnlineNodesState()}};
+"""
+    )
+    expected_nodes = [] if confirmation and not delete_fails else [
+        {
+            "ip": "10.1.1.10",
+            "online": True,
+            "firstSeenAt": "2026-08-01T08:00:00Z",
+            "lastSeenAt": "2026-08-31T10:20:30Z",
+        }
+    ]
+    assert result == {
+        "calls": expected_calls,
+        "state": {"available": available, "nodes": expected_nodes},
     }
 
 

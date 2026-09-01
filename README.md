@@ -367,7 +367,7 @@ Full list of environment variables:
 | `HERMES_WEBUI_PASSWORD` | *(unset)* | Set to enable password authentication |
 | `HERMES_WEBUI_CSP_CONNECT_EXTRA` | *(unset)* | Optional space-separated `http(s)://` or `ws(s)://` origins to append to the enforced and report-only CSP `connect-src` directives for trusted reverse-proxy, tunnel, or extension sidecar deployments |
 | `HERMES_WEBUI_SSE_CHUNKED` | *(unset)* | Set truthy (`1`/`true`/`yes`/`on`) to send SSE with `Transfer-Encoding: chunked`. Needed behind buffering reverse proxies (e.g. `jupyter-server-proxy`) that otherwise buffer the whole stream; harmless but unnecessary for directly-served deployments |
-| `HERMES_WEBUI_I2STREAM_CONSOLE_URL` | `http://127.0.0.1:50091` | HTTP(S) origin of the i2Stream compatibility service. The same-origin `/api/i2stream-console/*` facade exposes only knowledge files, reports, and plugin conversation history queried by an explicit client ID. It is protected by WebUI authentication when WebUI authentication is enabled. |
+| `HERMES_WEBUI_I2STREAM_CONSOLE_URL` | `http://127.0.0.1:50091` | HTTP(S) origin of the i2Stream compatibility service. The same-origin `/api/i2stream-console/*` facade exposes its allowlisted knowledge, report, plugin-history, and node-management routes. It is protected by WebUI authentication when WebUI authentication is enabled. |
 | `HERMES_WEBUI_I2STREAM_CONSOLE_TOKEN` | *(unset)* | Internal bearer token attached by the WebUI server to allowlisted compatibility-service requests; it is never accepted from or returned to the browser. This value is required and must match Agent Console `PROXY_API_KEY` whenever that key is configured. |
 | `HERMES_WEBUI_I2STREAM_CONSOLE_TIMEOUT_SECONDS` | `30` | Positive upstream connect/read timeout for the i2Stream compatibility facade. Report content is streamed in bounded chunks rather than buffered in WebUI memory. |
 | `HERMES_WEBUI_EXTENSION_DIR` | *(unset)* | Optional local directory served at `/extensions/`; must point to an existing directory before extension injection is enabled |
@@ -391,6 +391,9 @@ loopback service. Browser chat keeps the WebUI's default in-process backend;
 the separately running Hermes Gateway remains dedicated to the extension bridge.
 The integrated Knowledge view supports per-file selection, select all, and a
 confirmed batch delete for clearing multiple indexed files quickly.
+The Node management view lists each reporting IP with its first and latest
+heartbeat, shows the 90-second online state, and allows a retained node record
+to be deleted. A deleted node is created again if it sends another heartbeat.
 
 ---
 

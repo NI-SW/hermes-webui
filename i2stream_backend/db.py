@@ -11,6 +11,17 @@ chat_schema_ready = False
 SQLITE_DB_PATH = Path("/app/data/agent-console/chat.db")
 SQLITE_TIMEOUT_SECONDS = 5.0
 
+NODE_HEARTBEAT_SCHEMA_STATEMENT = """
+CREATE TABLE IF NOT EXISTS node_heartbeats (
+    ip TEXT NOT NULL PRIMARY KEY,
+    first_seen_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    CHECK (LENGTH(TRIM(ip)) > 0),
+    CHECK (LENGTH(TRIM(first_seen_at)) > 0),
+    CHECK (LENGTH(TRIM(last_seen_at)) > 0)
+)
+"""
+
 CHAT_SCHEMA_STATEMENTS = (
     """
     CREATE TABLE IF NOT EXISTS chat_clients (
@@ -87,14 +98,7 @@ CHAT_SCHEMA_STATEMENTS = (
         CHECK (LENGTH(TRIM(session_id)) > 0)
     )
     """,
-    """
-    CREATE TABLE IF NOT EXISTS node_heartbeats (
-        ip TEXT NOT NULL PRIMARY KEY,
-        last_seen_at TEXT NOT NULL,
-        CHECK (LENGTH(TRIM(ip)) > 0),
-        CHECK (LENGTH(TRIM(last_seen_at)) > 0)
-    )
-    """,
+    NODE_HEARTBEAT_SCHEMA_STATEMENT,
 )
 
 CHAT_SCHEMA_INDEX_STATEMENTS = (
@@ -127,6 +131,27 @@ def sqlite_connection() -> Any:
         connection.close()
 
 
+def _migrate_node_heartbeat_schema(connection: sqlite3.Connection) -> None:
+    columns = {
+        row["name"]
+        for row in connection.execute("PRAGMA table_info(node_heartbeats)").fetchall()
+    }
+    if "first_seen_at" in columns:
+        return
+
+    legacy_table = "node_heartbeats_before_first_seen"
+    connection.execute(f"ALTER TABLE node_heartbeats RENAME TO {legacy_table}")
+    connection.execute(NODE_HEARTBEAT_SCHEMA_STATEMENT)
+    connection.execute(
+        f"""
+        INSERT INTO node_heartbeats (ip, first_seen_at, last_seen_at)
+        SELECT ip, last_seen_at, last_seen_at
+        FROM {legacy_table}
+        """
+    )
+    connection.execute(f"DROP TABLE {legacy_table}")
+
+
 def ensure_chat_schema() -> None:
     global chat_schema_ready
     if chat_schema_ready:
@@ -136,8 +161,10 @@ def ensure_chat_schema() -> None:
             return
 
         with sqlite_connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
             for statement in CHAT_SCHEMA_STATEMENTS:
                 connection.execute(statement)
+            _migrate_node_heartbeat_schema(connection)
             for statement in CHAT_SCHEMA_INDEX_STATEMENTS:
                 connection.execute(statement)
             connection.commit()

@@ -4,11 +4,11 @@
 const I2STREAM_API = '/api/i2stream-console';
 const I2STREAM_HISTORY_PAGE_SIZE = 30;
 const I2STREAM_NODES_POLL_INTERVAL_MS = 30_000;
-const I2STREAM_SECTIONS = new Set(['knowledge', 'reports', 'history']);
+const I2STREAM_SECTIONS = new Set(['knowledge', 'reports', 'history', 'nodes']);
 const I2STREAM_CLIENT_ID_RE = /^[A-Za-z0-9_-]{16,128}$/;
 const _i2streamState = {
   section: 'knowledge',
-  loaded: {knowledge: false, reports: false, history: false},
+  loaded: {knowledge: false, reports: false, history: false, nodes: false},
   knowledgeFiles: [],
   selectedKnowledgeFileIds: new Set(),
   knowledgeDeleteInFlight: false,
@@ -19,7 +19,7 @@ const _i2streamState = {
   selectedConversationKey: null,
   selectedReportToken: null,
   knowledgeTaskGeneration: 0,
-  requestGeneration: {knowledge: 0, reports: 0, history: 0},
+  requestGeneration: {knowledge: 0, reports: 0, history: 0, nodes: 0},
   historyDetailGeneration: 0,
   bindingsReady: false,
   nodes: [],
@@ -29,6 +29,7 @@ const _i2streamState = {
   nodesPollTimer: null,
   nodesFooterObserver: null,
   nodesBindingsReady: false,
+  nodeDeleteInFlight: false,
 };
 
 function _i2ContractObject(value, label) {
@@ -140,13 +141,25 @@ function parseNodes(value) {
     if (typeof item.online !== 'boolean') {
       throw new TypeError(`node ${index} online must be a boolean`);
     }
+    const firstSeenAt = _i2ContractString(item.first_seen_at, `node ${index} first_seen_at`);
     const lastSeenAt = _i2ContractString(item.last_seen_at, `node ${index} last_seen_at`);
+    if (!/(?:Z|\+00:00)$/.test(firstSeenAt) || Number.isNaN(Date.parse(firstSeenAt))) {
+      throw new TypeError(`node ${index} first_seen_at must be an ISO 8601 UTC timestamp`);
+    }
     if (!/(?:Z|\+00:00)$/.test(lastSeenAt) || Number.isNaN(Date.parse(lastSeenAt))) {
       throw new TypeError(`node ${index} last_seen_at must be an ISO 8601 UTC timestamp`);
     }
-    return {ip, online: item.online, lastSeenAt};
+    if (Date.parse(firstSeenAt) > Date.parse(lastSeenAt)) {
+      throw new TypeError(`node ${index} first_seen_at must not be later than last_seen_at`);
+    }
+    return {ip, online: item.online, firstSeenAt, lastSeenAt};
   });
   return {offlineAfterSeconds: payload.offline_after_seconds, nodes};
+}
+
+async function deleteNodeRequest(ip) {
+  const nodeIp = _i2ContractString(ip, 'node deletion IP');
+  await api(`${I2STREAM_API}/nodes/${encodeURIComponent(nodeIp)}`, {method: 'DELETE'});
 }
 
 function reconcileKnowledgeSelection(files, selectedFileIds) {
@@ -444,9 +457,11 @@ function _stopOnlineNodesPolling() {
 function startOnlineNodesPolling() {
   _stopOnlineNodesPolling();
   if (document.visibilityState !== 'visible') return;
-  void loadOnlineNodes();
+  void (_i2streamState.section === 'nodes' ? loadI2StreamNodes(false) : loadOnlineNodes());
   _i2streamState.nodesPollTimer = setInterval(() => {
-    if (document.visibilityState === 'visible') void loadOnlineNodes();
+    if (document.visibilityState === 'visible') {
+      void (_i2streamState.section === 'nodes' ? loadI2StreamNodes(false) : loadOnlineNodes());
+    }
   }, I2STREAM_NODES_POLL_INTERVAL_MS);
 }
 
@@ -500,7 +515,27 @@ function _i2EnsureBindings() {
   }
   const history = document.getElementById('i2streamHistoryList');
   if (history) history.addEventListener('keydown', _i2HistoryKeydown);
+  const sectionTabs = document.querySelector('.i2stream-side-menu');
+  if (sectionTabs) sectionTabs.addEventListener('keydown', _i2SectionKeydown);
   _i2streamState.bindingsReady = true;
+}
+
+function _i2SectionKeydown(event) {
+  const current = event.target.closest?.('[data-i2stream-section]');
+  if (!current) return;
+  const tabs = Array.from(document.querySelectorAll('[data-i2stream-section]'));
+  const currentIndex = tabs.indexOf(current);
+  if (currentIndex < 0) return;
+  let nextIndex;
+  if (event.key === 'Home') nextIndex = 0;
+  else if (event.key === 'End') nextIndex = tabs.length - 1;
+  else if (event.key === 'ArrowRight' || event.key === 'ArrowDown') nextIndex = (currentIndex + 1) % tabs.length;
+  else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') nextIndex = (currentIndex - 1 + tabs.length) % tabs.length;
+  else return;
+  event.preventDefault();
+  const next = tabs[nextIndex];
+  next.focus();
+  void switchI2StreamSection(next.dataset.i2streamSection);
 }
 
 async function loadI2StreamConsole(force = false) {
@@ -515,13 +550,14 @@ async function switchI2StreamSection(section, force = false) {
     const active = button.dataset.i2streamSection === section;
     button.classList.toggle('active', active);
     button.setAttribute('aria-selected', active ? 'true' : 'false');
+    button.tabIndex = active ? 0 : -1;
   });
   document.querySelectorAll('[data-i2stream-page]').forEach(page => {
     page.hidden = page.dataset.i2streamPage !== section;
   });
   const title = document.getElementById('i2streamMainTitle');
   if (title) {
-    const key = {knowledge:'i2stream_knowledge',reports:'i2stream_reports',history:'i2stream_history'}[section];
+    const key = {knowledge:'i2stream_knowledge',reports:'i2stream_reports',history:'i2stream_history',nodes:'i2stream_nodes'}[section];
     title.dataset.i18n = key;
     title.textContent = _i2Text(key);
   }
@@ -531,7 +567,9 @@ async function switchI2StreamSection(section, force = false) {
   const sideScope = document.getElementById('i2streamSideScope');
   const sideScopeText = document.getElementById('i2streamSideScopeText');
   if (scopeExplainer) {
-    const key = scoped ? 'i2stream_client_explainer' : 'i2stream_global_explainer';
+    const key = section === 'nodes'
+      ? 'i2stream_nodes_explainer'
+      : (scoped ? 'i2stream_client_explainer' : 'i2stream_global_explainer');
     scopeExplainer.dataset.i18n = key;
     scopeExplainer.textContent = _i2Text(key);
   }
@@ -552,6 +590,7 @@ async function switchI2StreamSection(section, force = false) {
   }
   if (section === 'knowledge' && (force || !_i2streamState.loaded.knowledge)) await loadI2StreamKnowledge();
   if (section === 'reports' && (force || !_i2streamState.loaded.reports)) await loadI2StreamReports();
+  if (section === 'nodes') await loadI2StreamNodes(true);
   if (section === 'history') {
     if (_i2streamState.historyClientId && (force || !_i2streamState.loaded.history)) {
       await loadI2StreamHistory(true);
@@ -565,6 +604,134 @@ async function refreshI2StreamConsole() {
   _i2streamState.knowledgeTaskGeneration += 1;
   _i2streamState.loaded[_i2streamState.section] = false;
   await switchI2StreamSection(_i2streamState.section, true);
+}
+
+async function loadI2StreamNodes(announce = true) {
+  const generation = ++_i2streamState.requestGeneration.nodes;
+  if (announce) _i2SetStatus('i2streamNodesStatus', _i2Text('loading'));
+  const loaded = await loadOnlineNodes();
+  if (generation !== _i2streamState.requestGeneration.nodes) return 'superseded';
+  _i2streamState.loaded.nodes = loaded;
+  _i2RenderNodeManagement();
+  if (announce || !loaded) {
+    _i2SetStatus(
+      'i2streamNodesStatus',
+      loaded ? '' : _i2Text('online_nodes_unavailable'),
+      loaded ? '' : 'error',
+    );
+  }
+  return loaded ? 'success' : 'failed';
+}
+
+function _i2RenderNodeManagement() {
+  const summary = document.getElementById('i2streamNodesSummary');
+  const container = document.getElementById('i2streamNodesList');
+  const nodes = _i2streamState.nodes;
+  const onlineCount = nodes.filter(node => node.online).length;
+  if (summary) {
+    summary.textContent = _i2streamState.nodesOfflineAfterSeconds === null
+      ? ''
+      : _i2Text(
+        'i2stream_nodes_summary',
+        onlineCount,
+        nodes.length,
+        _i2streamState.nodesOfflineAfterSeconds,
+      );
+  }
+  if (!container) return;
+  container.replaceChildren();
+  if (!nodes.length) {
+    const empty = document.createElement('div');
+    empty.className = 'i2stream-empty';
+    empty.textContent = _i2Text('i2stream_nodes_empty');
+    container.appendChild(empty);
+    return;
+  }
+
+  nodes.forEach(node => {
+    const row = document.createElement('div');
+    row.className = `i2stream-row i2stream-node-management-row ${node.online ? 'online' : 'offline'}`;
+
+    const statusRail = document.createElement('span');
+    statusRail.className = 'i2stream-node-status-rail';
+    statusRail.setAttribute('aria-hidden', 'true');
+
+    const main = document.createElement('div');
+    main.className = 'i2stream-row-main';
+    const titleLine = document.createElement('div');
+    titleLine.className = 'i2stream-node-title-line';
+    const title = document.createElement('div');
+    title.className = 'i2stream-row-title i2stream-node-address';
+    title.textContent = node.ip;
+    const state = document.createElement('span');
+    state.className = `i2stream-node-state ${node.online ? 'online' : 'offline'}`;
+    state.textContent = _i2Text(node.online ? 'online_nodes_online' : 'online_nodes_offline');
+    titleLine.append(title, state);
+
+    const meta = document.createElement('div');
+    meta.className = 'i2stream-row-meta i2stream-node-times';
+    const firstSeen = document.createElement('span');
+    firstSeen.textContent = _i2Text('i2stream_node_first_seen', _i2FormatDate(node.firstSeenAt));
+    const lastSeen = document.createElement('span');
+    lastSeen.textContent = _i2Text('i2stream_node_last_seen', _i2FormatDate(node.lastSeenAt));
+    meta.append(firstSeen, lastSeen);
+    main.append(titleLine, meta);
+
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'i2stream-action danger';
+    remove.disabled = _i2streamState.nodeDeleteInFlight;
+    remove.textContent = _i2Text('delete_title');
+    remove.setAttribute('aria-label', _i2Text('i2stream_node_delete_confirm', node.ip));
+    remove.addEventListener('click', () => deleteI2StreamNode(node.ip));
+    row.append(statusRail, main, remove);
+    container.appendChild(row);
+  });
+}
+
+async function deleteI2StreamNode(ip) {
+  if (_i2streamState.nodeDeleteInFlight) return;
+  const confirmed = await showConfirmDialog({
+    title: _i2Text('i2stream_node_delete_confirm', ip),
+    message: _i2Text('i2stream_node_delete_warning'),
+    confirmLabel: _i2Text('delete_title'),
+    danger: true,
+    focusCancel: true,
+  });
+  if (!confirmed) return;
+
+  // showConfirmDialog restores focus on a timer after resolving. Let that run
+  // before a successful refresh replaces the triggering row.
+  await new Promise(resolve => setTimeout(resolve, 0));
+  _i2streamState.nodeDeleteInFlight = true;
+  document.querySelectorAll('#i2streamNodesList .i2stream-action.danger').forEach(button => {
+    button.disabled = true;
+  });
+  _i2SetStatus('i2streamNodesStatus', _i2Text('i2stream_node_deleting', ip));
+  try {
+    await deleteNodeRequest(ip);
+    if (_i2streamState.nodesRequestInFlight !== null) {
+      await _i2streamState.nodesRequestInFlight;
+    }
+    _i2streamState.nodes = _i2streamState.nodes.filter(node => node.ip !== ip);
+    _renderOnlineNodes();
+    _i2RenderNodeManagement();
+    const refreshResult = await loadI2StreamNodes(false);
+    const refreshed = refreshResult !== 'failed' && _i2streamState.nodesAvailable === true;
+    _i2SetStatus(
+      'i2streamNodesStatus',
+      _i2Text(refreshed ? 'i2stream_node_deleted' : 'i2stream_node_deleted_refresh_failed', ip),
+      refreshed ? '' : 'error',
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    _i2SetStatus('i2streamNodesStatus', `${_i2Text('error_prefix')}${message}`, 'error');
+  } finally {
+    _i2streamState.nodeDeleteInFlight = false;
+    _i2RenderNodeManagement();
+    const status = document.getElementById('i2streamNodesStatus');
+    if (status) status.focus();
+  }
 }
 
 async function loadI2StreamKnowledge() {
@@ -991,6 +1158,9 @@ window.__i2streamConsoleTest = {
   conversationPageUrl,
   conversationDetailUrl,
   parseNodes,
+  deleteNodeRequest,
+  deleteI2StreamNode,
+  loadI2StreamNodes,
   loadOnlineNodes,
   getOnlineNodesState: _onlineNodesStateForTest,
   loadI2StreamHistory,

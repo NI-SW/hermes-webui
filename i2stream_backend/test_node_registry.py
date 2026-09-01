@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -17,7 +18,7 @@ os.environ.setdefault("GATEWAY_BRIDGE_TOKEN", "gateway-token-32-bytes-for-tests!
 import db
 import main
 from models import HeartbeatRequest
-from node_store import OFFLINE_AFTER_SECONDS, list_nodes, record_heartbeat
+from node_store import OFFLINE_AFTER_SECONDS, delete_node, list_nodes, record_heartbeat
 
 
 class HeartbeatRequestTests(unittest.TestCase):
@@ -65,10 +66,90 @@ class NodeStoreTests(unittest.TestCase):
                 {
                     "ip": "10.1.1.10",
                     "online": True,
+                    "first_seen_at": "2026-08-31T01:02:03Z",
                     "last_seen_at": "2026-08-31T01:03:03Z",
                 }
             ],
         )
+
+    def test_migrates_existing_nodes_with_last_seen_as_earliest_known_time(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            sqlite_path = Path(temp_dir) / "chat.db"
+            with sqlite3.connect(sqlite_path) as connection:
+                connection.execute(
+                    "CREATE TABLE node_heartbeats (ip TEXT PRIMARY KEY, last_seen_at TEXT NOT NULL)"
+                )
+                connection.execute(
+                    "INSERT INTO node_heartbeats (ip, last_seen_at) VALUES (?, ?)",
+                    ("10.1.1.9", "2026-08-31T01:02:03Z"),
+                )
+
+            with patch.object(db, "SQLITE_DB_PATH", sqlite_path):
+                nodes = list_nodes(
+                    datetime(2026, 8, 31, 1, 4, 0, tzinfo=timezone.utc)
+                )
+                with db.sqlite_connection() as connection:
+                    columns = {
+                        row["name"]: row["notnull"]
+                        for row in connection.execute(
+                            "PRAGMA table_info(node_heartbeats)"
+                        ).fetchall()
+                    }
+
+        self.assertEqual(columns["first_seen_at"], 1)
+        self.assertEqual(nodes[0]["first_seen_at"], "2026-08-31T01:02:03Z")
+        self.assertEqual(nodes[0]["last_seen_at"], "2026-08-31T01:02:03Z")
+
+    def test_failed_migration_rolls_back_without_renaming_or_losing_nodes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            sqlite_path = Path(temp_dir) / "chat.db"
+            with sqlite3.connect(sqlite_path) as connection:
+                connection.execute(
+                    "CREATE TABLE node_heartbeats (ip TEXT PRIMARY KEY, last_seen_at TEXT NOT NULL)"
+                )
+                connection.execute(
+                    "INSERT INTO node_heartbeats (ip, last_seen_at) VALUES (?, ?)",
+                    ("10.1.1.9", "2026-08-31T01:02:03Z"),
+                )
+
+            with (
+                patch.object(db, "SQLITE_DB_PATH", sqlite_path),
+                patch.object(db, "NODE_HEARTBEAT_SCHEMA_STATEMENT", "INVALID SQL"),
+                self.assertRaises(sqlite3.OperationalError),
+            ):
+                db.ensure_chat_schema()
+
+            with sqlite3.connect(sqlite_path) as connection:
+                tables = {
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT name FROM sqlite_master WHERE type = 'table'"
+                    ).fetchall()
+                }
+                rows = connection.execute(
+                    "SELECT ip, last_seen_at FROM node_heartbeats"
+                ).fetchall()
+
+        self.assertIn("node_heartbeats", tables)
+        self.assertNotIn("node_heartbeats_before_first_seen", tables)
+        self.assertEqual(rows, [("10.1.1.9", "2026-08-31T01:02:03Z")])
+
+    def test_delete_removes_node_until_it_reports_another_heartbeat(self) -> None:
+        first_seen = datetime(2026, 8, 31, 1, 2, 3, tzinfo=timezone.utc)
+        returned_at = first_seen + timedelta(minutes=5)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            sqlite_path = Path(temp_dir) / "chat.db"
+            with patch.object(db, "SQLITE_DB_PATH", sqlite_path):
+                record_heartbeat("10.1.1.10", first_seen)
+                self.assertTrue(delete_node("10.1.1.10"))
+                self.assertFalse(delete_node("10.1.1.10"))
+                self.assertEqual(list_nodes(returned_at), [])
+
+                record_heartbeat("10.1.1.10", returned_at)
+                nodes = list_nodes(returned_at)
+
+        self.assertEqual(nodes[0]["first_seen_at"], "2026-08-31T01:07:03Z")
 
     def test_marks_node_offline_only_after_90_seconds_and_keeps_it(self) -> None:
         last_seen = datetime(2026, 8, 31, 1, 2, 3, tzinfo=timezone.utc)
@@ -128,11 +209,37 @@ class NodeApiTests(unittest.IsolatedAsyncioTestCase):
                     {
                         "ip": "2001:db8::1",
                         "online": True,
+                        "first_seen_at": "2026-08-31T01:02:03Z",
                         "last_seen_at": "2026-08-31T01:02:03Z",
                     }
                 ],
             },
         )
+
+    async def test_delete_node_http_contract_is_idempotent(self) -> None:
+        received_at = datetime(2026, 8, 31, 1, 2, 3, tzinfo=timezone.utc)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            sqlite_path = Path(temp_dir) / "chat.db"
+            with (
+                patch.object(db, "SQLITE_DB_PATH", sqlite_path),
+                patch.object(main, "utc_now", return_value=received_at),
+            ):
+                transport = httpx.ASGITransport(app=main.app)
+                async with httpx.AsyncClient(
+                    transport=transport,
+                    base_url="http://testserver",
+                ) as client:
+                    await client.post("/api/heartbeat", json={"ip": "2001:db8::1"})
+                    deleted = await client.delete("/api/nodes/2001%3Adb8%3A%3A1")
+                    missing = await client.delete("/api/nodes/2001%3Adb8%3A%3A1")
+                    nodes = await client.get("/api/nodes")
+
+        self.assertEqual(deleted.status_code, 204)
+        self.assertEqual(deleted.content, b"")
+        self.assertEqual(missing.status_code, 204)
+        self.assertEqual(missing.content, b"")
+        self.assertEqual(nodes.json()["nodes"], [])
 
     async def test_heartbeat_http_rejects_extra_fields(self) -> None:
         transport = httpx.ASGITransport(app=main.app)

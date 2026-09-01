@@ -106,7 +106,7 @@ from models import (
     HeartbeatRequest,
     MessageFeedbackRequest,
 )
-from node_store import OFFLINE_AFTER_SECONDS, list_nodes, record_heartbeat
+from node_store import OFFLINE_AFTER_SECONDS, delete_node, list_nodes, record_heartbeat
 from progress import (
     append_progress,
     finish_progress,
@@ -482,6 +482,15 @@ async def nodes() -> dict[str, Any]:
         "offline_after_seconds": OFFLINE_AFTER_SECONDS,
         "nodes": list_nodes(utc_now()),
     }
+
+
+@app.delete("/api/nodes/{ip}", status_code=204)
+async def remove_node(ip: str) -> Response:
+    try:
+        delete_node(ip)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+    return Response(status_code=204)
 
 
 @app.websocket("/internal/gateway")

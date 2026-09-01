@@ -94,6 +94,11 @@ def _json_body(handler: FakeHandler) -> dict:
         ("GET", "/api/i2stream-console/knowledge/tasks/task_123", "/api/knowledge/tasks/task_123"),
         ("GET", "/api/i2stream-console/reports", "/api/reports"),
         ("GET", "/api/i2stream-console/nodes", "/api/nodes"),
+        (
+            "DELETE",
+            "/api/i2stream-console/nodes/2001%3Adb8%3A%3A1",
+            "/api/nodes/2001%3Adb8%3A%3A1",
+        ),
         ("DELETE", "/api/i2stream-console/reports/abcdefghijklmnop", "/api/reports/abcdefghijklmnop"),
         (
             "GET",
@@ -129,6 +134,8 @@ def test_allowlist_maps_only_console_data_routes(method, webui_path, upstream_pa
         ("POST", "/api/i2stream-console/nodes"),
         ("POST", "/api/i2stream-console/heartbeat"),
         ("GET", "/api/i2stream-console/nodes?debug=1"),
+        ("DELETE", "/api/i2stream-console/nodes/not-an-ip"),
+        ("DELETE", "/api/i2stream-console/nodes/fe80%3A%3A1%25eth0"),
         ("PATCH", "/api/i2stream-console/knowledge/files"),
         ("GET", "/api/i2stream-console/reports/abc/content"),
         ("GET", "/api/i2stream-console/knowledge/files/a%2Fb"),

@@ -63,6 +63,22 @@ Backend-hosted Dashboard page. It provides a left navigation with knowledge uplo
 
 Redirects to `/dashboard`.
 
+### `POST /api/heartbeat`
+
+Records the reporting IPv4 or IPv6 address. The JSON body is `{"ip":"10.1.1.10"}`.
+The first heartbeat time is retained, each later heartbeat updates the latest
+time, and a node is offline only after more than 90 seconds without a heartbeat.
+
+### `GET /api/nodes`
+
+Lists all retained node records with their first heartbeat, latest heartbeat,
+and current online state.
+
+### `DELETE /api/nodes/{ip}`
+
+Deletes one retained node record. The operation is idempotent; a later heartbeat
+from the same IP creates the record again.
+
 ### `POST /api/agent/requests`
 
 SSE endpoint for the Tampermonkey assistant.

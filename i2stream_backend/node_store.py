@@ -12,6 +12,7 @@ OFFLINE_AFTER_SECONDS = 90
 class NodeStatus(TypedDict):
     ip: str
     online: bool
+    first_seen_at: str
     last_seen_at: str
 
 
@@ -41,13 +42,25 @@ def record_heartbeat(ip: str, received_at: datetime) -> None:
     with sqlite_connection() as connection:
         connection.execute(
             """
-            INSERT INTO node_heartbeats (ip, last_seen_at)
-            VALUES (?, ?)
+            INSERT INTO node_heartbeats (ip, first_seen_at, last_seen_at)
+            VALUES (?, ?, ?)
             ON CONFLICT(ip) DO UPDATE SET last_seen_at = excluded.last_seen_at
             """,
-            (canonical_ip, received_timestamp),
+            (canonical_ip, received_timestamp, received_timestamp),
         )
         connection.commit()
+
+
+def delete_node(ip: str) -> bool:
+    canonical_ip = normalize_node_ip(ip)
+    ensure_chat_schema()
+    with sqlite_connection() as connection:
+        cursor = connection.execute(
+            "DELETE FROM node_heartbeats WHERE ip = ?",
+            (canonical_ip,),
+        )
+        connection.commit()
+    return cursor.rowcount == 1
 
 
 def list_nodes(observed_at: datetime) -> list[NodeStatus]:
@@ -56,7 +69,7 @@ def list_nodes(observed_at: datetime) -> list[NodeStatus]:
     with sqlite_connection() as connection:
         rows = connection.execute(
             """
-            SELECT ip, last_seen_at
+            SELECT ip, first_seen_at, last_seen_at
             FROM node_heartbeats
             ORDER BY ip
             """
@@ -64,12 +77,14 @@ def list_nodes(observed_at: datetime) -> list[NodeStatus]:
 
     nodes: list[NodeStatus] = []
     for row in rows:
+        first_seen_at = _parse_utc_timestamp(row["first_seen_at"])
         last_seen_at = _parse_utc_timestamp(row["last_seen_at"])
         age_seconds = (observed_timestamp - last_seen_at).total_seconds()
         nodes.append(
             {
                 "ip": row["ip"],
                 "online": age_seconds <= OFFLINE_AFTER_SECONDS,
+                "first_seen_at": _utc_timestamp(first_seen_at),
                 "last_seen_at": _utc_timestamp(last_seen_at),
             }
         )
