@@ -43,6 +43,20 @@ class VectorSearchHostConfigTests(unittest.TestCase):
         self.assertEqual(settings.dashboard_hermes_api_key.get_secret_value(), "stream-qa-secret")
         self.assertNotIn("stream-qa-secret", repr(settings))
 
+    def test_feedback_hermes_api_key_is_redacted(self) -> None:
+        settings = Settings(
+            _env_file=None,
+            vector_search_host="http://127.0.0.1:8900",
+            hermes_api_key="feedback-hermes-secret",
+            **self.secret_settings,
+        )
+
+        self.assertEqual(
+            settings.hermes_api_key.get_secret_value(),
+            "feedback-hermes-secret",
+        )
+        self.assertNotIn("feedback-hermes-secret", repr(settings))
+
     def test_vector_search_host_accepts_http_host_port(self) -> None:
         settings = Settings(
             _env_file=None,
@@ -109,6 +123,34 @@ class VectorSearchHostConfigTests(unittest.TestCase):
         representation = repr(settings)
         self.assertNotIn(self.secret_settings["session_hmac_secret"], representation)
         self.assertNotIn(self.secret_settings["gateway_bridge_token"], representation)
+
+    def test_webui_feedback_bridge_token_is_redacted(self) -> None:
+        settings = Settings(
+            _env_file=None,
+            vector_search_host="http://127.0.0.1:8900",
+            webui_feedback_bridge_token="native-feedback-secret-at-least-32-bytes",
+            **self.secret_settings,
+        )
+
+        self.assertEqual(
+            settings.webui_feedback_bridge_token.get_secret_value(),
+            "native-feedback-secret-at-least-32-bytes",
+        )
+        self.assertNotIn("native-feedback-secret-at-least-32-bytes", repr(settings))
+
+    def test_configured_webui_feedback_bridge_token_requires_32_bytes(self) -> None:
+        with self.assertRaises(ValidationError) as raised:
+            Settings(
+                _env_file=None,
+                vector_search_host="http://127.0.0.1:8900",
+                webui_feedback_bridge_token="short",
+                **self.secret_settings,
+            )
+
+        self.assertEqual(
+            {error["loc"] for error in raised.exception.errors()},
+            {("webui_feedback_bridge_token",)},
+        )
 
     def test_datacop_uses_built_in_agent_project_defaults(self) -> None:
         settings = Settings(

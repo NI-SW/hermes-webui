@@ -70,6 +70,18 @@ class MessageFeedbackRequest(BaseModel):
     feedback: Literal["like", "dislike"]
 
 
+class WebUIFeedbackSnapshotMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str
+    payload: dict[str, Any] | None = None
+
+
+class WebUIMessageFeedbackRequest(BaseModel):
+    source_instance_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+    feedback: Literal["like", "dislike"]
+    messages: list[WebUIFeedbackSnapshotMessage] = Field(min_length=1)
+
+
 class HeartbeatRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 

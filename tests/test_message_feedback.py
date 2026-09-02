@@ -73,9 +73,30 @@ def _post_feedback(routes, monkeypatch, payload):
     return captured
 
 
-def test_message_feedback_three_state_round_trip(tmp_path, monkeypatch):
+def test_like_submits_trusted_snapshot_and_persists_datacop_job(tmp_path, monkeypatch):
     message_feedback, _models, routes, messages = _isolated_session(tmp_path, monkeypatch)
+    messages[1]["attachments"] = [
+        {"name": "/private/reports/result.pdf", "description": "诊断结果"}
+    ]
+    session = routes.get_session("feedback-session")
+    session.messages[1]["attachments"] = messages[1]["attachments"]
+    session.save(skip_index=True)
     ref = _client_message_ref(messages[1])
+    calls = []
+
+    def submit(source_instance_id, session_id, message_ref, feedback, snapshot):
+        calls.append((source_instance_id, session_id, message_ref, feedback, snapshot))
+        return {
+            "feedback": "like",
+            "status": "queued",
+            "job_id": "a" * 32,
+            "session_id": session_id,
+            "message_ref": message_ref,
+            "datacop_problem_id": None,
+            "error": None,
+        }
+
+    monkeypatch.setattr(routes, "submit_webui_feedback", submit)
 
     liked = _post_feedback(
         routes,
@@ -84,35 +105,55 @@ def test_message_feedback_three_state_round_trip(tmp_path, monkeypatch):
     )
     assert liked == {
         "status": 200,
-        "payload": {"ok": True, "feedback": "like"},
+        "payload": {
+            "ok": True,
+            "feedback": "like",
+            "status": "queued",
+            "job_id": "a" * 32,
+            "session_id": "feedback-session",
+            "message_ref": routes._normalize_anchor_scene_message_ref(ref),
+            "datacop_problem_id": None,
+            "error": None,
+        },
     }
+    assert len(calls) == 1
+    source_instance_id, session_id, message_ref, feedback, snapshot = calls[0]
+    assert len(source_instance_id) == 64
+    assert session_id == "feedback-session"
+    assert message_ref == routes._normalize_anchor_scene_message_ref(ref)
+    assert feedback == "like"
+    assert snapshot == [
+        {"role": "user", "content": "question"},
+        {
+            "role": "assistant",
+            "content": "first answer",
+            "payload": {"files": [{"name": "result.pdf", "description": "诊断结果"}]},
+        },
+    ]
     stored = message_feedback.feedback_for_session("feedback-session")
     assert len(stored) == 1
-    assert next(iter(stored.values())) == "like"
+    record = next(iter(stored.values()))
+    assert record.feedback == "like"
+    assert record.status == "queued"
+    assert record.job_id == "a" * 32
 
-    disliked = _post_feedback(
+    conflicting = _post_feedback(
         routes,
         monkeypatch,
         {"session_id": "feedback-session", "message_ref": ref, "feedback": "dislike"},
     )
-    assert disliked == {
-        "status": 200,
-        "payload": {"ok": True, "feedback": "dislike"},
-    }
-    stored = message_feedback.feedback_for_session("feedback-session")
-    assert len(stored) == 1
-    assert next(iter(stored.values())) == "dislike"
+    assert conflicting["status"] == 409
+    assert conflicting["payload"] == {"error": "Message feedback is already recorded"}
+    assert len(calls) == 1
 
     cleared = _post_feedback(
         routes,
         monkeypatch,
         {"session_id": "feedback-session", "message_ref": ref, "feedback": None},
     )
-    assert cleared == {
-        "status": 200,
-        "payload": {"ok": True, "feedback": None},
-    }
-    assert message_feedback.feedback_for_session("feedback-session") == {}
+    assert cleared["status"] == 400
+    assert cleared["payload"] == {"error": "feedback must be like or dislike"}
+    assert message_feedback.feedback_for_session("feedback-session")[message_ref].feedback == "like"
 
 
 def test_message_feedback_rejects_invalid_state_and_non_assistant_target(tmp_path, monkeypatch):
@@ -128,7 +169,7 @@ def test_message_feedback_rejects_invalid_state_and_non_assistant_target(tmp_pat
         },
     )
     assert invalid["status"] == 400
-    assert invalid["payload"] == {"error": "feedback must be like, dislike, or null"}
+    assert invalid["payload"] == {"error": "feedback must be like or dislike"}
 
     user_target = _post_feedback(
         routes,
@@ -166,7 +207,9 @@ def test_session_projection_attaches_feedback_without_mutating_session_messages(
 
     assert projected[0].get("_feedback") is None
     assert projected[1]["_feedback"] == "like"
+    assert projected[1]["_feedback_status"] == "legacy"
     assert projected[3]["_feedback"] == "dislike"
+    assert projected[3]["_feedback_status"] == "legacy"
     assert all("_feedback" not in message for message in messages)
 
     db = sqlite3.connect(tmp_path / "message_feedback.db")
@@ -181,7 +224,62 @@ def test_session_projection_attaches_feedback_without_mutating_session_messages(
     assert {row[2] for row in rows} == {"like", "dislike"}
 
     message_feedback.prune_feedback_for_session("feedback-session", {first_ref})
-    assert message_feedback.feedback_for_session("feedback-session") == {first_ref: "like"}
+    remaining = message_feedback.feedback_for_session("feedback-session")
+    assert remaining[first_ref].feedback == "like"
 
     message_feedback.prune_feedback_for_session("feedback-session", set())
     assert message_feedback.feedback_for_session("feedback-session") == {}
+
+
+def test_feedback_job_status_refreshes_persisted_projection(tmp_path, monkeypatch):
+    message_feedback, _models, routes, messages = _isolated_session(tmp_path, monkeypatch)
+    message_ref = routes._normalize_anchor_scene_message_ref(_client_message_ref(messages[1]))
+    record = message_feedback.FeedbackRecord(
+        session_id="feedback-session",
+        message_ref=message_ref,
+        feedback="like",
+        status="queued",
+        job_id="b" * 32,
+        datacop_problem_id=None,
+        error=None,
+    )
+    message_feedback.record_feedback(record)
+
+    monkeypatch.setattr(
+        routes,
+        "get_webui_feedback_job",
+        lambda source_instance_id, job_id: {
+            "feedback": "like",
+            "status": "succeeded",
+            "job_id": job_id,
+            "session_id": "feedback-session",
+            "message_ref": message_ref,
+            "datacop_problem_id": 91,
+            "error": None,
+        },
+    )
+    captured = {}
+    monkeypatch.setattr(routes, "j", lambda _handler, body, status=200, **_kwargs: captured.update(body=body, status=status) or True)
+
+    assert routes.handle_get(
+        SimpleNamespace(command="GET"),
+        SimpleNamespace(path=f"/api/message-feedback/jobs/{'b' * 32}", query=""),
+    ) is True
+    assert captured["status"] == 200
+    assert captured["body"]["status"] == "succeeded"
+    assert captured["body"]["datacop_problem_id"] == 91
+    stored = message_feedback.feedback_for_session("feedback-session")[message_ref]
+    assert stored.status == "succeeded"
+    assert stored.datacop_problem_id == 91
+
+
+def test_feedback_source_instance_id_is_persistent_and_private(tmp_path, monkeypatch):
+    from api import message_feedback
+
+    monkeypatch.setattr(message_feedback, "STATE_DIR", tmp_path)
+    first = message_feedback.feedback_source_instance_id()
+    second = message_feedback.feedback_source_instance_id()
+
+    assert first == second
+    assert len(first) == 64
+    assert (tmp_path / "message_feedback_instance_id").stat().st_mode & 0o777 == 0o600

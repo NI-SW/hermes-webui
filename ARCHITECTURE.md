@@ -61,7 +61,8 @@ actions. The topbar remains focused on conversation context and the workspace/fi
       helpers.py           HTTP helpers: j(), bad(), require(), safe_resolve(), security headers
       goals.py             Persistent-goal commands and profile-scoped native GoalManager bridge
       models.py            Session model + CRUD, per-session profile tracking, CLI/state.db bridge
-      message_feedback.py  Three-state assistant-answer feedback in a separate SQLite store
+      message_feedback.py  Native assistant feedback projection and stable WebUI source identity
+      i2stream_feedback_client.py  Authenticated server-to-server client for 50091 DataCop jobs
       profiles.py          Profile state management, hermes_cli wrapper
       onboarding.py        First-run onboarding status, real provider config writes, OAuth linking, readiness detection
       routes.py            All GET + POST route handlers (if/elif dispatch, no decorators)
@@ -108,7 +109,8 @@ State directory (runtime data, separate from source):
 
     ~/.hermes/webui/
     sessions/          One JSON file per session: {session_id}.json
-    message_feedback.db Feedback keyed by session_id + stable assistant message reference
+    message_feedback.db Last acknowledged DataCop-feedback projection keyed by session_id + stable assistant message reference
+    message_feedback_instance_id Persistent source identity used to isolate WebUI feedback in 50091
     workspaces.json    Registered workspaces list
     last_workspace.txt Last-used workspace path
     settings.json      User settings (default model, workspace, send key, password hash)
@@ -1369,7 +1371,9 @@ Complete list of all HTTP endpoints as of Sprint 1 (v0.3).
     /api/session/new           {"model"?, "workspace"?} -> new session
     /api/session/update        {"session_id", "workspace"?, "model"?} -> updated session
     /api/session/delete        {"session_id"} -> {"ok": true}
-    /api/message-feedback      {"session_id", "message_ref", "feedback": "like"|"dislike"|null}
+    /api/message-feedback      {"session_id", "message_ref", "feedback": "like"|"dislike"}
+                               Validates the native session, builds a trusted transcript snapshot,
+                               and submits immutable feedback to the authenticated 50091 bridge.
     /api/chat/start            {"session_id", "message", "model"?, "workspace"?}
                                -> {"stream_id", "session_id"}. Starts agent daemon thread.
     /api/chat                  (fallback, sync) {"session_id", "message", "model"?, "workspace"?}
@@ -1380,6 +1384,10 @@ Complete list of all HTTP endpoints as of Sprint 1 (v0.3).
                                -> {"ok": true, "choice": choice}
 
 ### GET Endpoints Added in Sprint 3
+
+    /api/message-feedback/jobs/{job_id}
+                               Refreshes a known native like job and persists its latest
+                               queued/summarizing/uploading/succeeded/failed projection.
 
     /api/crons                 All cron jobs. Returns {jobs: [...]}.
     /api/crons/output          ?job_id=X&limit=N -> {outputs: [{filename, content}]}

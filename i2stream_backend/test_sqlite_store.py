@@ -9,7 +9,11 @@ from unittest.mock import patch
 import chat_store
 import db
 from dashboard_session_store import SQLiteDashboardSessionStore
-from dialoginteract import MessageFeedbackRecord, SQLiteFeedbackStore
+from dialoginteract import (
+    MessageFeedbackRecord,
+    SQLiteFeedbackStore,
+    SQLiteWebUIFeedbackStore,
+)
 
 
 class SqliteConfigTests(unittest.TestCase):
@@ -236,6 +240,85 @@ class SqliteStoreTests(unittest.TestCase):
                                 """,
                                 ("c" * 64, index, *row),
                             )
+
+    def test_webui_feedback_uses_independent_text_keyed_store(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            sqlite_path = Path(temp_dir) / "chat.db"
+            with patch.object(db, "SQLITE_DB_PATH", sqlite_path):
+                store = SQLiteWebUIFeedbackStore()
+                record = MessageFeedbackRecord(
+                    client_id="f" * 64,
+                    conversation_id="webui-session-1",
+                    message_id="a" * 64,
+                    feedback="like",
+                    status="queued",
+                    job_id="native-job-1",
+                    datacop_problem_id=None,
+                    error=None,
+                )
+                created, stored = store.create(record)
+                duplicate_created, duplicate = SQLiteWebUIFeedbackStore().create(record)
+                updated = store.update_job(
+                    "native-job-1",
+                    status="succeeded",
+                    datacop_problem_id=91,
+                    error=None,
+                )
+                other_instance_created, _ = store.create(
+                    MessageFeedbackRecord(
+                        client_id="e" * 64,
+                        conversation_id="webui-session-1",
+                        message_id="a" * 64,
+                        feedback="like",
+                        status="queued",
+                        job_id="native-job-2",
+                        datacop_problem_id=None,
+                        error=None,
+                    )
+                )
+                with db.sqlite_connection() as connection:
+                    native_count = connection.execute(
+                        "SELECT COUNT(*) FROM webui_message_feedback"
+                    ).fetchone()[0]
+                    extension_count = connection.execute(
+                        "SELECT COUNT(*) FROM message_feedback"
+                    ).fetchone()[0]
+                wrong_instance = store.get_by_job("e" * 64, "native-job-1")
+
+        self.assertTrue(created)
+        self.assertFalse(duplicate_created)
+        self.assertEqual(duplicate, stored)
+        self.assertEqual(updated.message_id, "a" * 64)
+        self.assertEqual(updated.status, "succeeded")
+        self.assertTrue(other_instance_created)
+        self.assertEqual(native_count, 2)
+        self.assertEqual(extension_count, 0)
+        self.assertIsNone(wrong_instance)
+
+    def test_webui_incomplete_feedback_is_failed_after_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            sqlite_path = Path(temp_dir) / "chat.db"
+            with patch.object(db, "SQLITE_DB_PATH", sqlite_path):
+                store = SQLiteWebUIFeedbackStore()
+                store.create(
+                    MessageFeedbackRecord(
+                        client_id="f" * 64,
+                        conversation_id="webui-session-1",
+                        message_id="b" * 64,
+                        feedback="like",
+                        status="uploading",
+                        job_id="native-job-2",
+                        datacop_problem_id=None,
+                        error=None,
+                    )
+                )
+
+                changed = store.fail_incomplete("Background task interrupted")
+                restored = store.get_by_job("f" * 64, "native-job-2")
+
+        self.assertEqual(changed, 1)
+        self.assertEqual(restored.status, "failed")
+        self.assertEqual(restored.error, "Background task interrupted")
 
 
 if __name__ == "__main__":

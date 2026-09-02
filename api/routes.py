@@ -62,10 +62,17 @@ from api.session_events import (
 from api.gateway_restart import restart_active_profile_gateway
 from api.shares import create_or_refresh_share, load_share, revoke_share
 from api.message_feedback import (
-    clear_feedback,
+    FeedbackRecord,
+    feedback_for_job,
     feedback_for_session,
+    feedback_source_instance_id,
     prune_feedback_for_session,
-    set_feedback,
+    record_feedback,
+)
+from api.i2stream_feedback_client import (
+    FeedbackServiceError,
+    get_webui_feedback_job,
+    submit_webui_feedback,
 )
 
 logger = logging.getLogger(__name__)
@@ -4120,7 +4127,18 @@ def _messages_with_feedback(session_id: str, messages: list) -> list:
         copy_message = dict(message)
         if message.get("role") == "assistant":
             message_ref = _assistant_anchor_scene_message_ref(message)
-            copy_message["_feedback"] = stored.get(message_ref)
+            feedback_record = stored.get(message_ref)
+            copy_message["_feedback"] = (
+                feedback_record.feedback if feedback_record is not None else None
+            )
+            if feedback_record is not None:
+                copy_message["_feedback_message_ref"] = feedback_record.message_ref
+                copy_message["_feedback_status"] = feedback_record.status
+                copy_message["_feedback_job_id"] = feedback_record.job_id
+                copy_message["_feedback_datacop_problem_id"] = (
+                    feedback_record.datacop_problem_id
+                )
+                copy_message["_feedback_error"] = feedback_record.error
         else:
             copy_message.pop("_feedback", None)
         projected.append(copy_message)
@@ -4135,6 +4153,107 @@ def _prune_message_feedback(session_id: str, messages: list) -> None:
     }
     message_refs.discard("")
     prune_feedback_for_session(session_id, message_refs)
+
+
+def _message_feedback_snapshot(messages: list, through_index: int) -> list[dict]:
+    """Project trusted native history into the bounded 50091 dialog format."""
+    snapshot: list[dict] = []
+    for message in messages[: through_index + 1]:
+        if not isinstance(message, dict):
+            continue
+        role = message.get("role")
+        if role not in {"user", "assistant"}:
+            continue
+        if message.get("_live") or message.get("_error") or message.get("_statusCard"):
+            continue
+        if role == "assistant":
+            if message.get("_source") == "process_wakeup":
+                continue
+            if _is_context_compression_marker(message):
+                continue
+            content = _anchor_scene_final_answer_text(message).strip()
+        else:
+            content = _anchor_scene_message_text(message).strip()
+        if not content:
+            continue
+        item = {"role": role, "content": content}
+        attachments = message.get("attachments")
+        if isinstance(attachments, list):
+            files = []
+            for attachment in attachments:
+                if isinstance(attachment, str):
+                    name = attachment.replace("\\", "/").rsplit("/", 1)[-1]
+                    description = ""
+                elif isinstance(attachment, dict):
+                    raw_name = attachment.get("name") or attachment.get("filename")
+                    name = str(raw_name or "").replace("\\", "/").rsplit("/", 1)[-1]
+                    description = str(attachment.get("description") or "")
+                else:
+                    continue
+                if name:
+                    files.append({"name": name, "description": description})
+            if files:
+                item["payload"] = {"files": files}
+        snapshot.append(item)
+    return snapshot
+
+
+def _feedback_record_from_payload(
+    payload: dict,
+    *,
+    session_id: str,
+    message_ref: str,
+    job_id: str | None = None,
+) -> FeedbackRecord:
+    if payload.get("session_id") != session_id or payload.get("message_ref") != message_ref:
+        raise FeedbackServiceError("Feedback service returned a mismatched message")
+    feedback = payload.get("feedback")
+    status = payload.get("status")
+    payload_job_id = payload.get("job_id")
+    if job_id is not None and payload_job_id != job_id:
+        raise FeedbackServiceError("Feedback service returned a mismatched job")
+    if not isinstance(feedback, str) or not isinstance(status, str):
+        raise FeedbackServiceError("Feedback service returned an invalid state")
+    if payload_job_id is not None and (
+        not isinstance(payload_job_id, str)
+        or re.fullmatch(r"[0-9a-f]{32}", payload_job_id) is None
+    ):
+        raise FeedbackServiceError("Feedback service returned an invalid job id")
+    problem_id = payload.get("datacop_problem_id")
+    if problem_id is not None and type(problem_id) is not int:
+        raise FeedbackServiceError("Feedback service returned an invalid DataCop id")
+    error = payload.get("error")
+    if error is not None and not isinstance(error, str):
+        raise FeedbackServiceError("Feedback service returned an invalid error")
+    record = FeedbackRecord(
+        session_id=session_id,
+        message_ref=message_ref,
+        feedback=feedback,
+        status=status,
+        job_id=payload_job_id,
+        datacop_problem_id=problem_id,
+        error=error,
+    )
+    try:
+        stored = record_feedback(record)
+    except ValueError as exc:
+        raise FeedbackServiceError("Feedback service returned an invalid state") from exc
+    if stored.feedback != record.feedback:
+        raise FeedbackServiceError("Message feedback is already recorded", status=409)
+    return stored
+
+
+def _feedback_response(record: FeedbackRecord) -> dict:
+    return {
+        "ok": True,
+        "feedback": record.feedback,
+        "status": record.status,
+        "job_id": record.job_id,
+        "session_id": record.session_id,
+        "message_ref": record.message_ref,
+        "datacop_problem_id": record.datacop_problem_id,
+        "error": record.error,
+    }
 
 
 def _anchor_scene_records(session) -> dict:
@@ -12914,6 +13033,27 @@ def handle_get(handler, parsed) -> bool:
     if proxy_result is not False:
         return proxy_result
 
+    feedback_job_match = re.fullmatch(
+        r"/api/message-feedback/jobs/([0-9a-f]{32})",
+        parsed.path,
+    )
+    if feedback_job_match:
+        job_id = feedback_job_match.group(1)
+        stored = feedback_for_job(job_id)
+        if stored is None:
+            return bad(handler, "Feedback job not found", 404)
+        try:
+            payload = get_webui_feedback_job(feedback_source_instance_id(), job_id)
+            record = _feedback_record_from_payload(
+                payload,
+                session_id=stored.session_id,
+                message_ref=stored.message_ref,
+                job_id=job_id,
+            )
+        except FeedbackServiceError as exc:
+            return bad(handler, str(exc), exc.status)
+        return j(handler, _feedback_response(record))
+
     if parsed.path.startswith("/session/static/"):
         # Strip the leading "/session" so _serve_static() sees a path that
         # starts with "/static/" (its required prefix). _serve_static enforces
@@ -15652,8 +15792,8 @@ def handle_post(handler, parsed) -> bool:
         except ValueError as exc:
             return bad(handler, str(exc))
         feedback = body.get("feedback")
-        if feedback not in (None, "like", "dislike"):
-            return bad(handler, "feedback must be like, dislike, or null")
+        if feedback not in ("like", "dislike"):
+            return bad(handler, "feedback must be like or dislike")
         sid = body["session_id"]
         if not isinstance(sid, str) or not is_safe_session_id(sid):
             return bad(handler, "Invalid session_id", 400)
@@ -15686,11 +15826,28 @@ def handle_post(handler, parsed) -> bool:
                     and not _is_context_compression_marker(candidate)
                 ):
                     return bad(handler, "Assistant message not found", 404)
-            if feedback is None:
-                clear_feedback(sid, message_ref)
-            else:
-                set_feedback(sid, message_ref, feedback)
-        return j(handler, {"ok": True, "feedback": feedback})
+            stored = feedback_for_session(sid).get(message_ref)
+            if stored is not None and stored.status != "legacy":
+                if stored.feedback != feedback:
+                    return bad(handler, "Message feedback is already recorded", 409)
+                return j(handler, _feedback_response(stored))
+            snapshot = _message_feedback_snapshot(session.messages, message_index)
+        try:
+            payload = submit_webui_feedback(
+                feedback_source_instance_id(),
+                sid,
+                message_ref,
+                feedback,
+                snapshot,
+            )
+            record = _feedback_record_from_payload(
+                payload,
+                session_id=sid,
+                message_ref=message_ref,
+            )
+        except FeedbackServiceError as exc:
+            return bad(handler, str(exc), exc.status)
+        return j(handler, _feedback_response(record))
 
     if parsed.path == "/api/session/rename":
         try:

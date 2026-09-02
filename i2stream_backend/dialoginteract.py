@@ -5,16 +5,15 @@ import json
 import logging
 import time
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 
-from pydantic import SecretStr, ValidationError
+from pydantic import ValidationError
 
-from agent_task import AgentTaskError, run_agent_prompt
+from agent_task import AgentTaskError
 from datacop_client import DatacopClientError, DatacopProblem
 from db import ensure_chat_schema, sqlite_connection
-from gateway_bridge import GatewayBridge
 
 
 MAX_SNAPSHOT_BYTES = 256 * 1024
@@ -29,7 +28,9 @@ name 必须是简洁、明确的问题名称；无法从对话确认的信息填
 """
 
 logger = logging.getLogger(__name__)
-AgentRunner = Callable[..., Awaitable[str]]
+
+class AgentRunner(Protocol):
+    async def run_prompt(self, *, task_id: str, prompt: str) -> str: ...
 
 
 class ProblemUploader(Protocol):
@@ -44,7 +45,7 @@ class DialogInteractionConflictError(RuntimeError):
 class MessageFeedbackRecord:
     client_id: str
     conversation_id: str
-    message_id: int
+    message_id: int | str
     feedback: Literal["like", "dislike"]
     status: str
     job_id: str | None
@@ -62,7 +63,7 @@ class FeedbackStore(Protocol):
         self,
         client_id: str,
         conversation_id: str,
-        message_id: int,
+        message_id: int | str,
     ) -> MessageFeedbackRecord | None: ...
 
     def get_by_job(self, client_id: str, job_id: str) -> MessageFeedbackRecord | None: ...
@@ -129,7 +130,7 @@ class SQLiteFeedbackStore:
         self,
         client_id: str,
         conversation_id: str,
-        message_id: int,
+        message_id: int | str,
     ) -> MessageFeedbackRecord | None:
         ensure_chat_schema()
         with sqlite_connection() as connection:
@@ -226,12 +227,151 @@ class SQLiteFeedbackStore:
         )
 
 
+class SQLiteWebUIFeedbackStore:
+    """原生 WebUI 反馈存储；与扩展的整数消息主键完全隔离。"""
+
+    def create(
+        self,
+        record: MessageFeedbackRecord,
+    ) -> tuple[bool, MessageFeedbackRecord]:
+        ensure_chat_schema()
+        with sqlite_connection() as connection:
+            result = connection.execute(
+                """
+                INSERT INTO webui_message_feedback (
+                    source_instance_id, session_id, message_ref, feedback,
+                    status, job_id, datacop_problem_id, error
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(source_instance_id, session_id, message_ref) DO NOTHING
+                """,
+                (
+                    record.client_id,
+                    record.conversation_id,
+                    record.message_id,
+                    record.feedback,
+                    record.status,
+                    record.job_id,
+                    record.datacop_problem_id,
+                    record.error,
+                ),
+            )
+            row = connection.execute(
+                """
+                SELECT source_instance_id, session_id, message_ref, feedback,
+                       status, job_id, datacop_problem_id, error
+                FROM webui_message_feedback
+                WHERE source_instance_id = ? AND session_id = ? AND message_ref = ?
+                """,
+                (record.client_id, record.conversation_id, record.message_id),
+            ).fetchone()
+            connection.commit()
+        if row is None:
+            raise RuntimeError("WebUI message feedback insert did not produce a row")
+        return result.rowcount == 1, self._record_from_row(row)
+
+    def get_by_message(
+        self,
+        client_id: str,
+        conversation_id: str,
+        message_id: int | str,
+    ) -> MessageFeedbackRecord | None:
+        ensure_chat_schema()
+        with sqlite_connection() as connection:
+            row = connection.execute(
+                """
+                SELECT source_instance_id, session_id, message_ref, feedback,
+                       status, job_id, datacop_problem_id, error
+                FROM webui_message_feedback
+                WHERE source_instance_id = ? AND session_id = ? AND message_ref = ?
+                """,
+                (client_id, conversation_id, message_id),
+            ).fetchone()
+        return self._record_from_row(row) if row is not None else None
+
+    def get_by_job(self, client_id: str, job_id: str) -> MessageFeedbackRecord | None:
+        ensure_chat_schema()
+        with sqlite_connection() as connection:
+            row = connection.execute(
+                """
+                SELECT source_instance_id, session_id, message_ref, feedback,
+                       status, job_id, datacop_problem_id, error
+                FROM webui_message_feedback
+                WHERE source_instance_id = ? AND job_id = ?
+                """,
+                (client_id, job_id),
+            ).fetchone()
+        return self._record_from_row(row) if row is not None else None
+
+    def update_job(
+        self,
+        job_id: str,
+        *,
+        status: str,
+        datacop_problem_id: int | None,
+        error: str | None,
+    ) -> MessageFeedbackRecord:
+        ensure_chat_schema()
+        with sqlite_connection() as connection:
+            result = connection.execute(
+                """
+                UPDATE webui_message_feedback
+                SET status = ?, datacop_problem_id = ?, error = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE job_id = ?
+                """,
+                (status, datacop_problem_id, error, job_id),
+            )
+            row = connection.execute(
+                """
+                SELECT source_instance_id, session_id, message_ref, feedback,
+                       status, job_id, datacop_problem_id, error
+                FROM webui_message_feedback
+                WHERE job_id = ?
+                """,
+                (job_id,),
+            ).fetchone()
+            connection.commit()
+        if result.rowcount != 1 or row is None:
+            raise RuntimeError("WebUI message feedback job does not exist")
+        return self._record_from_row(row)
+
+    def fail_incomplete(self, error: str) -> int:
+        if not error.strip():
+            raise ValueError("Interrupted task error must not be blank")
+        ensure_chat_schema()
+        with sqlite_connection() as connection:
+            result = connection.execute(
+                """
+                UPDATE webui_message_feedback
+                SET status = 'failed', datacop_problem_id = NULL, error = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE status IN ('queued', 'summarizing', 'uploading')
+                """,
+                (error,),
+            )
+            connection.commit()
+        return result.rowcount
+
+    @staticmethod
+    def _record_from_row(row: Any) -> MessageFeedbackRecord:
+        return MessageFeedbackRecord(
+            client_id=row["source_instance_id"],
+            conversation_id=row["session_id"],
+            message_id=row["message_ref"],
+            feedback=row["feedback"],
+            status=row["status"],
+            job_id=row["job_id"],
+            datacop_problem_id=row["datacop_problem_id"],
+            error=row["error"],
+        )
+
+
 @dataclass(slots=True)
 class DialogInteractionJob:
     job_id: str
     client_id: str
     conversation_id: str
-    message_id: int
+    message_id: int | str
     messages: tuple[dict[str, object], ...]
     status: str
     created_at: float
@@ -245,19 +385,15 @@ class DialogInteractionService:
     def __init__(
         self,
         *,
-        bridge: GatewayBridge | object,
-        session_secret: SecretStr,
         uploader: ProblemUploader | None,
         store: FeedbackStore,
-        agent_runner: AgentRunner = run_agent_prompt,
+        agent_runner: AgentRunner,
         queue_size: int = 32,
         job_ttl_seconds: float = 900,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         if queue_size <= 0 or job_ttl_seconds <= 0:
             raise ValueError("queue size and job TTL must be positive")
-        self._bridge = bridge
-        self._session_secret = session_secret
         self._uploader = uploader
         self._store = store
         self._agent_runner = agent_runner
@@ -299,7 +435,7 @@ class DialogInteractionService:
         *,
         client_id: str,
         conversation_id: str,
-        message_id: int,
+        message_id: int | str,
         feedback: Literal["like", "dislike"],
         messages: list[dict[str, Any]],
     ) -> dict[str, object]:
@@ -345,16 +481,7 @@ class DialogInteractionService:
             return self._submission_payload(stored)
 
         try:
-            sanitized_messages = sanitize_snapshot(messages)
-            snapshot_bytes = len(
-                json.dumps(
-                    sanitized_messages,
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                ).encode("utf-8")
-            )
-            if snapshot_bytes > MAX_SNAPSHOT_BYTES:
-                raise ValueError("Conversation snapshot is too large")
+            sanitized_messages = validate_snapshot(messages)
             if self._uploader is None:
                 raise ValueError("DataCop feedback is not configured")
         except ValueError as exc:
@@ -410,9 +537,7 @@ class DialogInteractionService:
             if job.problem is None:
                 self._set_job_status(job, "summarizing")
                 prompt = build_summary_prompt(job.messages)
-                text = await self._agent_runner(
-                    self._bridge,
-                    self._session_secret,
+                text = await self._agent_runner.run_prompt(
                     task_id=job.job_id,
                     prompt=prompt,
                 )
@@ -525,6 +650,43 @@ class DialogInteractionService:
         }
 
 
+class WebUIDialogInteractionService(DialogInteractionService):
+    """复用扩展反馈状态机，并投影为原生 WebUI 的字段合同。"""
+
+    async def submit(
+        self,
+        *,
+        source_instance_id: str,
+        session_id: str,
+        message_ref: str,
+        feedback: Literal["like", "dislike"],
+        messages: list[dict[str, Any]],
+    ) -> dict[str, object]:
+        sanitized_messages = validate_snapshot(messages)
+        await super().submit(
+            client_id=source_instance_id,
+            conversation_id=session_id,
+            message_id=message_ref,
+            feedback=feedback,
+            messages=sanitized_messages,
+        )
+        record = self._store.get_by_message(source_instance_id, session_id, message_ref)
+        if record is None:
+            raise RuntimeError("WebUI feedback submission did not produce a record")
+        return self._webui_payload(self._status_payload(record))
+
+    def get_job(self, source_instance_id: str, job_id: str) -> dict[str, object] | None:
+        payload = super().get_job(source_instance_id, job_id)
+        return self._webui_payload(payload) if payload is not None else None
+
+    @staticmethod
+    def _webui_payload(payload: dict[str, object]) -> dict[str, object]:
+        translated = dict(payload)
+        translated["session_id"] = translated.pop("conversation_id")
+        translated["message_ref"] = translated.pop("message_id")
+        return translated
+
+
 def sanitize_snapshot(messages: list[dict[str, Any]]) -> list[dict[str, object]]:
     snapshot: list[dict[str, object]] = []
     for message in messages:
@@ -553,6 +715,16 @@ def sanitize_snapshot(messages: list[dict[str, Any]]) -> list[dict[str, object]]
         snapshot.append(item)
     if not snapshot:
         raise ValueError("Conversation snapshot has no user or assistant messages")
+    return snapshot
+
+
+def validate_snapshot(messages: list[dict[str, Any]]) -> list[dict[str, object]]:
+    snapshot = sanitize_snapshot(messages)
+    snapshot_bytes = len(
+        json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    )
+    if snapshot_bytes > MAX_SNAPSHOT_BYTES:
+        raise ValueError("Conversation snapshot is too large")
     return snapshot
 
 

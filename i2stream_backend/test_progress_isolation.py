@@ -181,9 +181,11 @@ class ProgressIsolationTests(unittest.IsolatedAsyncioTestCase):
                 cleanup_stopped.set()
 
         dialog_service = SimpleNamespace(start=AsyncMock(), stop=AsyncMock())
+        webui_dialog_service = SimpleNamespace(start=AsyncMock(), stop=AsyncMock())
         with (
             patch.object(main, "run_progress_cleanup", fake_cleanup),
             patch.object(main, "dialog_interaction_service", dialog_service),
+            patch.object(main, "webui_dialog_interaction_service", webui_dialog_service),
         ):
             async with main.lifespan(main.app):
                 await asyncio.wait_for(cleanup_started.wait(), timeout=1)
@@ -191,6 +193,8 @@ class ProgressIsolationTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(cleanup_stopped.is_set())
         dialog_service.start.assert_awaited_once_with()
         dialog_service.stop.assert_awaited_once_with()
+        webui_dialog_service.start.assert_awaited_once_with()
+        webui_dialog_service.stop.assert_awaited_once_with()
 
 
 if __name__ == "__main__":

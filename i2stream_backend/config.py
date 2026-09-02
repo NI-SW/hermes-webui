@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     hermes_base_url: str = "http://127.0.0.1:8642"
+    hermes_api_key: SecretStr = SecretStr("")
     dashboard_hermes_base_url: str = "http://127.0.0.1:8641"
     dashboard_hermes_api_key: SecretStr = SecretStr("")
     default_model: str = "hermes-agent"
@@ -32,6 +33,7 @@ class Settings(BaseSettings):
     vector_search_host: str
     session_hmac_secret: SecretStr
     gateway_bridge_token: SecretStr
+    webui_feedback_bridge_token: SecretStr = SecretStr("")
 
     @field_validator("session_hmac_secret", "gateway_bridge_token", mode="before")
     @classmethod
@@ -39,6 +41,16 @@ class Settings(BaseSettings):
         raw_value = value.get_secret_value() if isinstance(value, SecretStr) else value
         if not isinstance(raw_value, str) or len(raw_value.encode("utf-8")) < 32:
             raise ValueError("bridge secrets must contain at least 32 UTF-8 bytes")
+        return value
+
+    @field_validator("webui_feedback_bridge_token", mode="before")
+    @classmethod
+    def validate_webui_feedback_bridge_token(cls, value: object) -> object:
+        raw_value = value.get_secret_value() if isinstance(value, SecretStr) else value
+        if raw_value == "":
+            return value
+        if not isinstance(raw_value, str) or len(raw_value.encode("utf-8")) < 32:
+            raise ValueError("configured WebUI feedback bridge token must contain at least 32 UTF-8 bytes")
         return value
 
     @field_validator("hermes_base_url", "dashboard_hermes_base_url", "vector_search_host")

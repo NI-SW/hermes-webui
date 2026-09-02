@@ -18207,6 +18207,7 @@ function renderMessages(options){
   }
   _recycleStash.clear();
   if(typeof _deferClearProgrammaticScroll==='function') _deferClearProgrammaticScroll(160);
+  if(typeof resumeMessageFeedbackJobs==='function') resumeMessageFeedbackJobs();
 }
 
 function _toolDisplayName(tc){

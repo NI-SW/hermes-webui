@@ -90,6 +90,55 @@ CHAT_SCHEMA_STATEMENTS = (
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS webui_message_feedback (
+        source_instance_id TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        message_ref TEXT NOT NULL,
+        feedback TEXT NOT NULL,
+        status TEXT NOT NULL,
+        job_id TEXT NULL,
+        datacop_problem_id INTEGER NULL,
+        error TEXT NULL,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (source_instance_id, session_id, message_ref),
+        CHECK (
+            LENGTH(source_instance_id) = 64
+            AND source_instance_id NOT GLOB '*[^0-9a-f]*'
+        ),
+        CHECK (LENGTH(TRIM(session_id)) > 0),
+        CHECK (
+            LENGTH(message_ref) = 64
+            AND message_ref NOT GLOB '*[^0-9a-f]*'
+        ),
+        CHECK (
+            (
+                feedback = 'dislike'
+                AND status = 'received'
+                AND job_id IS NULL
+                AND datacop_problem_id IS NULL
+                AND error IS NULL
+            )
+            OR
+            (
+                feedback = 'like'
+                AND job_id IS NOT NULL
+                AND status IN ('queued', 'summarizing', 'uploading', 'succeeded', 'failed')
+            )
+        ),
+        CHECK (
+            (status = 'succeeded' AND datacop_problem_id IS NOT NULL AND datacop_problem_id > 0)
+            OR
+            (status != 'succeeded' AND datacop_problem_id IS NULL)
+        ),
+        CHECK (
+            (status = 'failed' AND error IS NOT NULL AND LENGTH(TRIM(error)) > 0)
+            OR
+            (status != 'failed' AND error IS NULL)
+        )
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS dashboard_agent_sessions (
         session_id TEXT NOT NULL PRIMARY KEY,
         owner_id TEXT NOT NULL,
@@ -109,6 +158,11 @@ CHAT_SCHEMA_INDEX_STATEMENTS = (
     """
     CREATE UNIQUE INDEX IF NOT EXISTS idx_message_feedback_job
     ON message_feedback (job_id)
+    WHERE job_id IS NOT NULL
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_webui_message_feedback_job
+    ON webui_message_feedback (job_id)
     WHERE job_id IS NOT NULL
     """,
     """

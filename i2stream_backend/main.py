@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
@@ -36,9 +37,11 @@ from fastapi.responses import (
 from auth import (
     TOKEN_PATTERN,
     require_proxy_auth,
+    require_webui_feedback_auth,
     validate_client_id,
     validate_request_id,
 )
+from agent_task import HermesResponsesAgent
 from chat_store import (
     assistant_message_exists,
     clear_visible_chat_messages,
@@ -59,6 +62,8 @@ from dialoginteract import (
     DialogInteractionConflictError,
     DialogInteractionService,
     SQLiteFeedbackStore,
+    SQLiteWebUIFeedbackStore,
+    WebUIDialogInteractionService,
 )
 from file_state import file_records, inbox_file_records, inbox_lock
 from file_store import (
@@ -105,6 +110,7 @@ from models import (
     DashboardSessionUpdateRequest,
     HeartbeatRequest,
     MessageFeedbackRequest,
+    WebUIMessageFeedbackRequest,
 )
 from node_store import OFFLINE_AFTER_SECONDS, delete_node, list_nodes, record_heartbeat
 from progress import (
@@ -135,9 +141,11 @@ async def lifespan(_: FastAPI):
     )
     await dashboard_agent_service.start()
     await dialog_interaction_service.start()
+    await webui_dialog_interaction_service.start()
     try:
         yield
     finally:
+        await webui_dialog_interaction_service.stop()
         await dialog_interaction_service.stop()
         await dashboard_agent_service.stop()
         cleanup_task.cancel()
@@ -150,6 +158,8 @@ gateway_bridge = GatewayBridge(settings.request_timeout_seconds)
 logger = logging.getLogger(__name__)
 PUBLIC_GATEWAY_FAILURE_MESSAGE = "Agent request failed. Please retry."
 MAX_SAFE_MESSAGE_ID = (1 << 53) - 1
+WEBUI_SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$")
+WEBUI_MESSAGE_REF_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 datacop_client = DatacopClient(
     base_url=settings.datacop_base_url,
@@ -158,11 +168,23 @@ datacop_client = DatacopClient(
     password=settings.datacop_password,
     timeout_seconds=settings.datacop_timeout_seconds,
 )
+feedback_agent = HermesResponsesAgent(
+    base_url=settings.hermes_base_url,
+    api_key=settings.hermes_api_key,
+    model=settings.default_model,
+    timeout_seconds=settings.request_timeout_seconds,
+)
 dialog_interaction_service = DialogInteractionService(
-    bridge=gateway_bridge,
-    session_secret=settings.session_hmac_secret,
     uploader=datacop_client,
     store=SQLiteFeedbackStore(),
+    agent_runner=feedback_agent,
+    queue_size=settings.dialog_interaction_queue_size,
+    job_ttl_seconds=settings.dialog_interaction_job_ttl_seconds,
+)
+webui_dialog_interaction_service = WebUIDialogInteractionService(
+    uploader=datacop_client,
+    store=SQLiteWebUIFeedbackStore(),
+    agent_runner=feedback_agent,
     queue_size=settings.dialog_interaction_queue_size,
     job_ttl_seconds=settings.dialog_interaction_job_ttl_seconds,
 )
@@ -829,6 +851,46 @@ async def get_dialog_interaction_job(
     job = dialog_interaction_service.get_job(client_id, job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Dialog interaction job not found")
+    return job
+
+
+@app.post("/api/webui/sessions/{session_id}/messages/{message_ref}/feedback")
+async def submit_webui_message_feedback(
+    session_id: str,
+    message_ref: str,
+    payload: WebUIMessageFeedbackRequest,
+    _: None = Depends(require_webui_feedback_auth),
+) -> dict[str, object]:
+    if not WEBUI_SESSION_ID_PATTERN.fullmatch(session_id):
+        raise HTTPException(status_code=400, detail="Invalid WebUI session id")
+    if not WEBUI_MESSAGE_REF_PATTERN.fullmatch(message_ref):
+        raise HTTPException(status_code=400, detail="Invalid WebUI message ref")
+    messages = [message.model_dump() for message in payload.messages]
+    if messages[-1]["role"] != "assistant":
+        raise HTTPException(status_code=400, detail="Snapshot must end with an assistant message")
+    try:
+        return await webui_dialog_interaction_service.submit(
+            source_instance_id=payload.source_instance_id,
+            session_id=session_id,
+            message_ref=message_ref,
+            feedback=payload.feedback,
+            messages=messages,
+        )
+    except DialogInteractionConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/webui/dialog-interactions/{job_id}")
+async def get_webui_dialog_interaction_job(
+    job_id: str,
+    source_instance_id: Annotated[str, Query(pattern=r"^[0-9a-f]{64}$")],
+    _: None = Depends(require_webui_feedback_auth),
+) -> dict[str, object]:
+    job = webui_dialog_interaction_service.get_job(source_instance_id, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="WebUI dialog interaction job not found")
     return job
 
 

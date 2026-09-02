@@ -23,6 +23,7 @@ cp .env.example .env
 Important variables:
 
 - `HERMES_BASE_URL`: Hermes API server URL, usually `http://127.0.0.1:8642`.
+- `HERMES_API_KEY`: server-only Bearer credential used by background feedback summaries sent to `HERMES_BASE_URL/v1/responses`.
 - `PORT`: backend port, default `50091`.
 - `PUBLIC_BASE_URL`: public base URL used in returned file links.
 - `FILE_STORE_DIR`: generated-file storage directory. Defaults to `/app/data/agent-console/files`.
@@ -31,6 +32,7 @@ Important variables:
 - `PROXY_API_KEY`: optional backend API key. If set, callers must send `Authorization: Bearer <key>`.
 - `SESSION_HMAC_SECRET`: required server-only secret of at least 32 UTF-8 bytes. It derives an opaque Gateway session ID from browser `client_id` and `conversation`.
 - `GATEWAY_BRIDGE_TOKEN`: required bridge credential of at least 32 UTF-8 bytes. The Gateway plugin sends it as a Bearer token when connecting to `/internal/gateway`.
+- `WEBUI_FEEDBACK_BRIDGE_TOKEN`: dedicated server-to-server Bearer token shared by the 8787 WebUI service and this backend. Native WebUI feedback endpoints fail closed when it is unset.
 - Chat history SQLite file is stored at `/app/data/agent-console/chat.db`. `/app/data` is mounted to the host in container deployments.
 
 The DataCop endpoint, target `agent` project, credentials, 30-second request timeout, 32-job queue, and 900-second job TTL are built into `config.py`. DataCop environment variables are intentionally not read.
@@ -142,13 +144,23 @@ Returns all stored conversations for a supplied browser client ID, ordered by mo
 
 Accepts `{"feedback":"like"}` or `{"feedback":"dislike"}` for an assistant message owned by the current browser identity and conversation. It requires `X-I2H-Client-Id` and the same optional proxy authentication as the other conversation APIs.
 
-`dislike` is acknowledged immediately and does not start a background task. `like` snapshots the visible conversation through the selected assistant message and queues an in-memory job. The job uses an isolated Gateway session to produce one strictly validated DataCop problem object, then sends one upload request to the existing DataCop problem API.
+`dislike` is acknowledged immediately and does not start a background task. `like` snapshots the visible conversation through the selected assistant message and queues an in-memory job. The job makes a stateless, non-stored request to the ordinary Hermes `/v1/responses` API, validates the returned DataCop problem object strictly, then sends one upload request to the existing DataCop problem API. It does not require the Hermes Gateway plugin to connect back to this backend.
 
 The first accepted feedback for a message is immutable. Its type, job ID, processing status, DataCop problem ID, and sanitized error are stored in chat SQLite, so chat history can restore the selected button and a repeated request cannot start another Agent task. The internal prompt, conversation snapshot, Agent response, and generated DataCop fields are not persisted. Summary and upload are one-shot operations and failures are terminal. A process restart marks unfinished jobs as failed instead of retrying them. The built-in 900-second TTL only releases finished in-memory snapshots; it does not delete the persisted feedback status. The original user conversation remains governed by the normal chat-history persistence rules.
 
 ### `GET /api/dialog-interactions/{job_id}`
 
 Returns the persisted like-job state for the same `X-I2H-Client-Id`: `queued`, `summarizing`, `uploading`, `succeeded`, or `failed`. Successful responses include `datacop_problem_id`; failures include a sanitized `error`. Unknown or another client's jobs return HTTP 404.
+
+### `POST /api/webui/sessions/{session_id}/messages/{message_ref}/feedback`
+
+Accepts native 8787 feedback as `{source_instance_id, feedback, messages}`. The source instance and message reference are 64-character lowercase hexadecimal identifiers, the snapshot must end with an assistant message, and its sanitized JSON representation is limited to 256 KiB. Authentication always requires `Authorization: Bearer <WEBUI_FEEDBACK_BRIDGE_TOKEN>` and does not depend on `PROXY_API_KEY`.
+
+Native WebUI feedback is persisted in the independent `webui_message_feedback` table and is idempotent by `(source_instance_id, session_id, message_ref)`. The first accepted selection is immutable. A dislike is stored as `received`; a like uses the same isolated Hermes summary and DataCop upload state machine as extension feedback. Unfinished native jobs are marked failed after a process restart.
+
+### `GET /api/webui/dialog-interactions/{job_id}?source_instance_id=...`
+
+Returns the persisted native WebUI like-job state. It requires the dedicated Bearer token and scopes lookup to the supplied source instance; a job owned by another instance returns HTTP 404. Response identifiers use `session_id` and `message_ref` rather than the extension API's `conversation_id` and integer `message_id`.
 
 ### `DELETE /api/conversations/{conversation_id}/messages`
 

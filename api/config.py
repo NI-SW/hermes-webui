@@ -59,6 +59,10 @@ I2STREAM_CONSOLE_BASE_URL = os.getenv(
 I2STREAM_CONSOLE_BEARER_TOKEN = (
     os.getenv("HERMES_WEBUI_I2STREAM_CONSOLE_TOKEN", "").strip() or None
 )
+I2STREAM_FEEDBACK_BRIDGE_TOKEN = os.getenv(
+    "HERMES_WEBUI_I2STREAM_FEEDBACK_TOKEN",
+    "",
+).strip()
 
 
 def _positive_finite_env_float(name: str, default: str) -> float:

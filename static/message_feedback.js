@@ -1,5 +1,8 @@
-// Three-state feedback for settled assistant answers. Session transcripts own
-// message content and context; this module persists only like/dislike state.
+// Immutable feedback for settled assistant answers. Likes start a Hermes job
+// that summarizes the trusted server-side transcript and uploads it to DataCop.
+
+const _MESSAGE_FEEDBACK_ACTIVE_STATUSES=new Set(['queued','summarizing','uploading']);
+const _messageFeedbackPollTimers=new Map();
 
 function _messageFeedbackValue(value){
   return value==='like'||value==='dislike'?value:null;
@@ -53,17 +56,139 @@ function messageFeedbackEligible(message, context){
   );
 }
 
+function _messageFeedbackStatusText(message){
+  const status=String(message&&message._feedback_status||'');
+  if(status==='legacy') return t('feedback_legacy');
+  if(status==='received') return t('feedback_received');
+  if(status==='queued') return t('feedback_queued');
+  if(status==='summarizing') return t('feedback_summarizing');
+  if(status==='uploading') return t('feedback_uploading');
+  if(status==='succeeded'){
+    const problemId=message&&message._feedback_datacop_problem_id;
+    if(!Number.isSafeInteger(problemId)||problemId<=0) return t('feedback_invalid_state');
+    return t('feedback_datacop_success').replace('{id}',String(problemId));
+  }
+  if(status==='failed'){
+    const error=String(message&&message._feedback_error||'').trim();
+    return `${t('feedback_datacop_failed')}: ${error||t('feedback_unknown_error')}`;
+  }
+  return '';
+}
+
 function messageFeedbackButtonsHtml(message, eligible){
   if(!eligible) return '';
   const current=_messageFeedbackValue(message&&message._feedback);
+  const status=String(message&&message._feedback_status||'');
+  const locked=!!current&&status!=='legacy';
   const button=(feedback,icon,labelKey)=>{
     const selected=current===feedback;
-    return `<button class="msg-action-btn msg-feedback-btn" type="button" data-feedback="${feedback}" aria-pressed="${selected?'true':'false'}" title="${esc(t(labelKey))}" aria-label="${esc(t(labelKey))}" onclick="toggleMessageFeedback(this,'${feedback}')">${li(icon,13)}</button>`;
+    return `<button class="msg-action-btn msg-feedback-btn" type="button" data-feedback="${feedback}" aria-pressed="${selected?'true':'false'}" title="${esc(t(labelKey))}" aria-label="${esc(t(labelKey))}"${locked?' disabled':''} onclick="toggleMessageFeedback(this,'${feedback}')">${li(icon,13)}</button>`;
   };
-  return button('like','thumbs-up','feedback_like')+button('dislike','thumbs-down','feedback_dislike');
+  const statusText=_messageFeedbackStatusText(message);
+  const statusClass=status==='failed'?' msg-feedback-status-error':'';
+  const statusHtml=statusText
+    ? `<span class="msg-feedback-status${statusClass}" title="${esc(statusText)}" aria-live="polite">${esc(statusText)}</span>`
+    : '';
+  return button('like','thumbs-up','feedback_like')
+    +button('dislike','thumbs-down','feedback_dislike')
+    +statusHtml;
 }
 
-async function toggleMessageFeedback(button, requestedFeedback){
+function _applyMessageFeedbackPayload(message,payload,expected){
+  if(!payload||payload.ok!==true||payload.session_id!==expected.sessionId){
+    throw new Error('message feedback response did not match the active session');
+  }
+  if(payload.feedback!=='like'&&payload.feedback!=='dislike'){
+    throw new Error('message feedback response contains an invalid feedback value');
+  }
+  if(expected.feedback&&payload.feedback!==expected.feedback){
+    throw new Error('message feedback response did not match the requested feedback');
+  }
+  if(!/^[0-9a-f]{64}$/.test(String(payload.message_ref||''))){
+    throw new Error('message feedback response contains an invalid message reference');
+  }
+  if(expected.messageRef&&payload.message_ref!==expected.messageRef){
+    throw new Error('message feedback response did not match the requested message');
+  }
+  if(expected.jobId&&payload.job_id!==expected.jobId){
+    throw new Error('message feedback response did not match the requested job');
+  }
+  const validStatuses=payload.feedback==='like'
+    ? ['queued','summarizing','uploading','succeeded','failed']
+    : ['received'];
+  if(!validStatuses.includes(payload.status)){
+    throw new Error('message feedback response contains an invalid status');
+  }
+  if(payload.feedback==='like'&&typeof payload.job_id!=='string'){
+    throw new Error('message feedback response is missing a job id');
+  }
+  if(payload.status==='succeeded'
+    &&(!Number.isSafeInteger(payload.datacop_problem_id)||payload.datacop_problem_id<=0)){
+    throw new Error('message feedback response is missing a DataCop problem id');
+  }
+  if(payload.status==='failed'
+    &&(typeof payload.error!=='string'||!payload.error.trim())){
+    throw new Error('message feedback response is missing an error');
+  }
+  message._feedback=payload.feedback;
+  message._feedback_status=payload.status;
+  message._feedback_job_id=payload.job_id||null;
+  message._feedback_message_ref=payload.message_ref;
+  message._feedback_datacop_problem_id=payload.datacop_problem_id??null;
+  message._feedback_error=payload.error??null;
+}
+
+function _scheduleMessageFeedbackPoll(sessionId,messageIndex,anchorRef,messageRef,jobId,delay=1500){
+  const key=`${sessionId}:${jobId}`;
+  if(_messageFeedbackPollTimers.has(key)) return;
+  const timer=setTimeout(()=>{
+    _messageFeedbackPollTimers.delete(key);
+    pollMessageFeedbackJob(sessionId,messageIndex,anchorRef,messageRef,jobId);
+  },delay);
+  _messageFeedbackPollTimers.set(key,timer);
+}
+
+async function pollMessageFeedbackJob(sessionId,messageIndex,anchorRef,messageRef,jobId){
+  if(!S.session||S.session.session_id!==sessionId||!Array.isArray(S.messages)) return;
+  const message=S.messages[messageIndex];
+  const anchors=window.HermesAssistantTurnAnchors;
+  if(!message||!anchors||anchors.assistantTurnMessageRef(message)!==anchorRef) return;
+  try{
+    const payload=await api(`/api/message-feedback/jobs/${encodeURIComponent(jobId)}`);
+    if(!S.session||S.session.session_id!==sessionId) return;
+    const current=S.messages[messageIndex];
+    if(!current||anchors.assistantTurnMessageRef(current)!==anchorRef) return;
+    _applyMessageFeedbackPayload(current,payload,{sessionId,messageRef,jobId,feedback:'like'});
+    renderMessages({preserveScroll:true});
+    if(_MESSAGE_FEEDBACK_ACTIVE_STATUSES.has(current._feedback_status)){
+      _scheduleMessageFeedbackPoll(sessionId,messageIndex,anchorRef,messageRef,jobId);
+    }
+  }catch(error){
+    if(typeof showToast==='function') showToast(`${t('feedback_status_failed')}: ${error.message}`,3600,'error');
+  }
+}
+
+function resumeMessageFeedbackJobs(){
+  if(!S.session||!Array.isArray(S.messages)) return;
+  const anchors=window.HermesAssistantTurnAnchors;
+  if(!anchors||typeof anchors.assistantTurnMessageRef!=='function') return;
+  const sessionId=String(S.session.session_id||'');
+  S.messages.forEach((message,messageIndex)=>{
+    if(message&&message._feedback==='like'
+      &&_MESSAGE_FEEDBACK_ACTIVE_STATUSES.has(message._feedback_status)
+      &&typeof message._feedback_job_id==='string'
+      &&/^[0-9a-f]{64}$/.test(String(message._feedback_message_ref||''))){
+      const anchorRef=anchors.assistantTurnMessageRef(message);
+      if(anchorRef){
+        _scheduleMessageFeedbackPoll(
+          sessionId,messageIndex,anchorRef,message._feedback_message_ref,message._feedback_job_id
+        );
+      }
+    }
+  });
+}
+
+async function toggleMessageFeedback(button,requestedFeedback){
   if(requestedFeedback!=='like'&&requestedFeedback!=='dislike'){
     throw new TypeError('requested feedback must be like or dislike');
   }
@@ -73,53 +198,58 @@ async function toggleMessageFeedback(button, requestedFeedback){
   if(!S.session||!Array.isArray(S.messages)) return;
   const message=S.messages[rawIdx];
   if(!message||message.role!=='assistant'||message._live) return;
+  if(_messageFeedbackValue(message._feedback)&&message._feedback_status!=='legacy') return;
   const anchors=window.HermesAssistantTurnAnchors;
   if(!anchors||typeof anchors.assistantTurnMessageRef!=='function'){
     throw new Error('assistant message reference service is unavailable');
   }
   const sessionId=String(S.session.session_id||'');
   if(!sessionId) throw new Error('active session has no session_id');
-  const messageRef=anchors.assistantTurnMessageRef(message);
-  if(!messageRef) throw new Error('assistant message has no stable reference');
-  const nextFeedback=_messageFeedbackValue(message._feedback)===requestedFeedback
-    ? null
-    : requestedFeedback;
+  const anchorRef=anchors.assistantTurnMessageRef(message);
+  if(!anchorRef) throw new Error('assistant message has no stable reference');
   const controls=row.querySelectorAll('.msg-feedback-btn');
   controls.forEach(control=>{
     control.disabled=true;
     control.setAttribute('aria-busy','true');
   });
+  let accepted=false;
   try{
-    const response=await api('/api/message-feedback',{
+    const payload=await api('/api/message-feedback',{
       method:'POST',
       body:JSON.stringify({
         session_id:sessionId,
-        message_ref:messageRef,
-        feedback:nextFeedback,
+        message_ref:anchorRef,
+        feedback:requestedFeedback,
       }),
     });
-    if(!response||response.ok!==true||response.feedback!==nextFeedback){
-      throw new Error('message feedback response did not match the requested state');
-    }
     if(!S.session||S.session.session_id!==sessionId) return;
     const current=S.messages[rawIdx];
-    if(!current||anchors.assistantTurnMessageRef(current)!==messageRef) return;
-    current._feedback=nextFeedback;
+    if(!current||anchors.assistantTurnMessageRef(current)!==anchorRef) return;
+    _applyMessageFeedbackPayload(current,payload,{sessionId,feedback:requestedFeedback});
+    accepted=true;
     renderMessages({preserveScroll:true});
+    if(current._feedback==='like'&&_MESSAGE_FEEDBACK_ACTIVE_STATUSES.has(current._feedback_status)){
+      _scheduleMessageFeedbackPoll(
+        sessionId,rawIdx,anchorRef,current._feedback_message_ref,current._feedback_job_id,0
+      );
+    }
   }catch(error){
     if(typeof showToast==='function') showToast(`${t('feedback_save_failed')}: ${error.message}`,3600,'error');
   }finally{
     controls.forEach(control=>{
-      control.disabled=false;
+      control.disabled=accepted;
       control.removeAttribute('aria-busy');
     });
   }
 }
 
 if(typeof window!=='undefined'){
+  window.resumeMessageFeedbackJobs=resumeMessageFeedbackJobs;
   window.__messageFeedbackTest=Object.freeze({
     messageFeedbackEligible,
     messageFeedbackButtonsHtml,
     toggleMessageFeedback,
+    pollMessageFeedbackJob,
+    resumeMessageFeedbackJobs,
   });
 }
