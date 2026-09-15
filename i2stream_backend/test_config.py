@@ -168,7 +168,7 @@ class VectorSearchHostConfigTests(unittest.TestCase):
         self.assertEqual(settings.agent_back_port, 15091)
         self.assertEqual(
             settings.logmonitor_image_path,
-            Path("/app/data/image/i2up-stream-mcp.tar"),
+            Path("/app/data/image/stream_node_mcp.tar.gz"),
         )
         self.assertEqual(
             settings.logmonitor_start_script_path,

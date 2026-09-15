@@ -36,7 +36,7 @@ Important variables:
 - `I2STREAM_INSTALL_INTERNAL_TOKEN`: server-to-server Bearer token for the LogMonitor installer. The 8787 facade and this backend must receive the same value; installer endpoints fail closed when it is empty.
 - `AGENT_PUBLIC_HOST`: optional IPv4 address advertised to installed nodes. When empty, the authenticated 8787 facade supplies the IPv4 Host from the browser's WebUI URL.
 - `AGENT_BASE_URL_PORT` / `AGENT_BACK_PORT`: ports used to derive `AGENT_BASE_URL` and `AGENT_BACK_URL`, defaulting to `8642` and `50091`.
-- `LOGMONITOR_IMAGE_PATH`: fixed node image archive, defaulting to `/app/data/image/i2up-stream-mcp.tar`. Deployments provide this directory through an external container mount.
+- `LOGMONITOR_IMAGE_PATH`: fixed node delivery archive, defaulting to `/app/data/image/stream_node_mcp.tar.gz`. Deployments provide this file through an external directory mount. The installer validates the archive and transfers its `stream_node_mcp/i2up-stream-mcp.tar` member to the target host.
 - `LOGMONITOR_START_SCRIPT_PATH`: fixed startup script embedded in the i2agent image at `/app/logmonitor-installer/start_stream_mcp.sh`.
 - `LOGMONITOR_KNOWN_HOSTS_PATH`: persistent OpenSSH host-key store used with `StrictHostKeyChecking=accept-new`.
 - Chat history SQLite file is stored at `/app/data/agent-console/chat.db`. `/app/data` is mounted to the host in container deployments.

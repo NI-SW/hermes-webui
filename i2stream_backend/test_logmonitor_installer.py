@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import io
 import json
 import os
 import subprocess
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -144,11 +146,15 @@ class LogMonitorInstallerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         root = Path(self.temp_dir.name)
-        self.image = root / "i2up-stream-mcp.tar"
-        self.image.write_bytes(b"node-image" * 1024)
+        self.image = root / "stream_node_mcp.tar.gz"
+        self.image_bytes = b"node-image" * 1024
+        with tarfile.open(self.image, "w:gz") as archive:
+            member = tarfile.TarInfo("stream_node_mcp/i2up-stream-mcp.tar")
+            member.size = len(self.image_bytes)
+            archive.addfile(member, io.BytesIO(self.image_bytes))
         self.script = root / "start_stream_mcp.sh"
         self.script.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
-        self.digest = hashlib.sha256(self.image.read_bytes()).hexdigest()
+        self.digest = hashlib.sha256(self.image_bytes).hexdigest()
         self.ssh = FakeSSH(self.digest)
         self.installer = LogMonitorInstaller(
             InstallerConfig(
@@ -234,6 +240,30 @@ class LogMonitorInstallerTests(unittest.TestCase):
         self.assertEqual(raised.exception.status_code, 503)
         self.assertEqual(self.ssh.scripts, [])
 
+    def test_preflight_fails_before_ssh_when_delivery_archive_has_no_image(self) -> None:
+        with tarfile.open(self.image, "w:gz") as archive:
+            content = b"not a docker image"
+            member = tarfile.TarInfo("stream_node_mcp/README.md")
+            member.size = len(content)
+            archive.addfile(member, io.BytesIO(content))
+
+        with self.assertRaises(InstallerError) as raised:
+            self.installer.preflight(
+                LogMonitorPreflightRequest(**request_values()),
+                "192.168.1.10",
+            )
+
+        self.assertEqual(raised.exception.status_code, 503)
+        self.assertEqual(self.ssh.scripts, [])
+
+    def test_preflight_reserves_time_for_slow_login_and_callback_checks(self) -> None:
+        request = LogMonitorPreflightRequest(**request_values())
+
+        with patch.object(self.ssh, "run_script", wraps=self.ssh.run_script) as run_script:
+            self.installer.preflight(request, "192.168.1.10")
+
+        self.assertGreaterEqual(run_script.call_args.kwargs["timeout_seconds"], 40)
+
     def test_installation_transfers_fixed_files_and_never_exposes_password(self) -> None:
         preflight_request = LogMonitorPreflightRequest(**request_values())
         preflight = self.installer.preflight(preflight_request, "192.168.1.10")
@@ -262,13 +292,15 @@ class LogMonitorInstallerTests(unittest.TestCase):
             set(uploaded),
             {"i2up-stream-mcp.tar", "start_stream_mcp.sh", "node.env"},
         )
+        self.assertEqual(uploaded["i2up-stream-mcp.tar"], self.image_bytes)
         node_env = uploaded["node.env"].decode("utf-8")
         self.assertIn("STREAM_LOG_MONITOR=1\n", node_env)
         self.assertIn("AGENT_BASE_URL=http://192.168.1.10:8642\n", node_env)
         self.assertIn("AGENT_BACK_URL=http://192.168.1.10:50091\n", node_env)
         self.assertIn("AGENT_API_KEY=", node_env)
         self.assertNotIn(PASSWORD, node_env)
-        self.assertTrue(any("docker top mcp-server" in script for script in self.ssh.scripts))
+        process_check = next(script for script in self.ssh.scripts if "docker top mcp-server" in script)
+        self.assertIn("docker top mcp-server -eo pid,args", process_check)
         self.assertTrue(any(script.startswith("rm -rf -- /tmp/i2stream-logmonitor") for script in self.ssh.scripts))
 
     def test_preflight_is_bound_to_parameters_and_consumed_by_installation(self) -> None:

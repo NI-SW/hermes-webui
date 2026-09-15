@@ -39,7 +39,7 @@ class Settings(BaseSettings):
     agent_public_host: str = ""
     agent_base_url_port: int = Field(default=8642, ge=1, le=65535)
     agent_back_port: int = Field(default=50091, ge=1, le=65535)
-    logmonitor_image_path: Path = Path("/app/data/image/i2up-stream-mcp.tar")
+    logmonitor_image_path: Path = Path("/app/data/image/stream_node_mcp.tar.gz")
     logmonitor_start_script_path: Path = Path(
         "/app/logmonitor-installer/start_stream_mcp.sh"
     )

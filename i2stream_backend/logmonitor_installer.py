@@ -7,7 +7,9 @@ import os
 import re
 import secrets
 import shlex
+import shutil
 import subprocess
+import tarfile
 import tempfile
 import threading
 import uuid
@@ -37,9 +39,11 @@ CHECK_NAMES = (
 )
 ACTIVE_JOB_STATUSES = frozenset({"queued", "running"})
 _REMOTE_TEMP_RE = re.compile(r"^/tmp/i2stream-logmonitor\.[A-Za-z0-9]+$")
+_IMAGE_ARCHIVE_MEMBER = "stream_node_mcp/i2up-stream-mcp.tar"
 _HASH_CHUNK_BYTES = 1024 * 1024
 _MAX_RETAINED_JOBS = 200
 _MAX_RETAINED_PREFLIGHTS = 1000
+_PREFLIGHT_TIMEOUT_SECONDS = 60
 logger = logging.getLogger(__name__)
 
 
@@ -207,10 +211,7 @@ class LogMonitorInstaller:
         return hashlib.sha256(encoded).hexdigest()
 
     def _preflight_script(self, payload: LogMonitorPreflightRequest, callback_host: str) -> str:
-        try:
-            image_bytes = self.config.image_path.stat().st_size
-        except OSError:
-            raise InstallerError("LogMonitor 安装制品缺失或不可读", 503) from None
+        image_bytes = self._image_member_size()
         required_kb = max((image_bytes * 2 + 1023) // 1024, 1024)
         values = {
             "active_home": payload.active_home,
@@ -250,6 +251,7 @@ class LogMonitorInstaller:
                 payload.ssh_username,
                 password,
                 self._preflight_script(payload, callback_host),
+                timeout_seconds=_PREFLIGHT_TIMEOUT_SECONDS,
             )
         except (OSError, subprocess.TimeoutExpired):
             result = None
@@ -400,6 +402,43 @@ class LogMonitorInstaller:
                 valid = False
             if not valid:
                 raise InstallerError("LogMonitor 安装制品缺失或不可读", 503)
+        self._image_member_size()
+
+    @staticmethod
+    def _image_member(archive: tarfile.TarFile) -> tarfile.TarInfo:
+        matches = [
+            member
+            for member in archive.getmembers()
+            if member.name == _IMAGE_ARCHIVE_MEMBER
+        ]
+        if len(matches) != 1 or not matches[0].isfile() or matches[0].size <= 0:
+            raise InstallerError("LogMonitor 镜像交付包无效或缺少镜像文件", 503)
+        return matches[0]
+
+    def _image_member_size(self) -> int:
+        try:
+            with tarfile.open(self.config.image_path, "r:gz") as archive:
+                return self._image_member(archive).size
+        except InstallerError:
+            raise
+        except (OSError, tarfile.TarError):
+            raise InstallerError("LogMonitor 镜像交付包无效或缺少镜像文件", 503) from None
+
+    def _extract_image(self, destination_dir: Path) -> Path:
+        destination = destination_dir / "i2up-stream-mcp.tar"
+        try:
+            with tarfile.open(self.config.image_path, "r:gz") as archive:
+                member = self._image_member(archive)
+                source = archive.extractfile(member)
+                if source is None:
+                    raise InstallerError("LogMonitor 镜像交付包无效或缺少镜像文件", 503)
+                with source, destination.open("wb") as target:
+                    shutil.copyfileobj(source, target)
+        except InstallerError:
+            raise
+        except (OSError, tarfile.TarError):
+            raise InstallerError("LogMonitor 镜像交付包无效或缺少镜像文件", 503) from None
+        return destination
 
     @staticmethod
     def _sha256_file(path: Path) -> str:
@@ -481,11 +520,14 @@ class LogMonitorInstaller:
 
             self._update_job(job_id, "transferring", "正在传输安装制品")
             with tempfile.TemporaryDirectory(prefix="i2stream-logmonitor-") as local_dir:
-                env_path = Path(local_dir) / "node.env"
+                local_path = Path(local_dir)
+                image_path = self._extract_image(local_path)
+                local_digest = self._sha256_file(image_path)
+                env_path = local_path / "node.env"
                 env_path.write_text(self._node_env(payload, callback_host), encoding="utf-8")
                 env_path.chmod(0o600)
                 transfers = (
-                    (self.config.image_path, f"{remote_dir}/i2up-stream-mcp.tar"),
+                    (image_path, f"{remote_dir}/i2up-stream-mcp.tar"),
                     (self.config.start_script_path, f"{remote_dir}/start_stream_mcp.sh"),
                     (env_path, f"{remote_dir}/node.env"),
                 )
@@ -494,7 +536,6 @@ class LogMonitorInstaller:
 
             self._run_required(payload, f"chmod 0600 {shlex.quote(remote_dir)}/node.env\nchmod 0700 {shlex.quote(remote_dir)}/start_stream_mcp.sh\n")
             self._update_job(job_id, "verifying_artifact", "正在校验镜像文件")
-            local_digest = self._sha256_file(self.config.image_path)
             digest_output = self._run_required(payload, f"sha256sum {shlex.quote(remote_dir)}/i2up-stream-mcp.tar | awk '{{print $1}}'\n")
             remote_digest = digest_output.decode("ascii", errors="ignore").strip()
             if not secrets.compare_digest(local_digest, remote_digest):
@@ -510,7 +551,7 @@ class LogMonitorInstaller:
             )
             process_check = (
                 "for ((attempt=0; attempt<15; attempt++)); do "
-                "if docker top mcp-server -eo args | grep -F 'debugtool/log_monitor/logmonitor9.py' >/dev/null 2>&1; "
+                "if docker top mcp-server -eo pid,args | grep -F 'debugtool/log_monitor/logmonitor9.py' >/dev/null 2>&1; "
                 "then exit 0; fi; sleep 2; done; exit 1\n"
             )
             self._run_required(payload, process_check, timeout=40)
