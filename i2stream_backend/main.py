@@ -24,6 +24,8 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
 )
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import (
     FileResponse,
@@ -36,6 +38,7 @@ from fastapi.responses import (
 
 from auth import (
     TOKEN_PATTERN,
+    require_install_auth,
     require_proxy_auth,
     require_webui_feedback_auth,
     validate_client_id,
@@ -101,6 +104,12 @@ from knowledge_store import (
     list_vector_files,
     upload_knowledge_file,
 )
+from logmonitor_installer import (
+    CALLBACK_HOST_HEADER,
+    InstallerConfig,
+    InstallerError,
+    LogMonitorInstaller,
+)
 from models import (
     ApprovalResponse,
     ClarificationResponse,
@@ -109,6 +118,8 @@ from models import (
     DashboardSessionCreateRequest,
     DashboardSessionUpdateRequest,
     HeartbeatRequest,
+    LogMonitorInstallRequest,
+    LogMonitorPreflightRequest,
     MessageFeedbackRequest,
     WebUIMessageFeedbackRequest,
 )
@@ -195,6 +206,18 @@ dashboard_agent_service = DashboardAgentService(
     session_store=SQLiteDashboardSessionStore(),
 )
 dashboard_anonymous_identity = DashboardAnonymousIdentity(settings.session_hmac_secret)
+logmonitor_installer = LogMonitorInstaller(
+    InstallerConfig(
+        agent_public_host=settings.agent_public_host,
+        agent_base_url_port=settings.agent_base_url_port,
+        agent_back_port=settings.agent_back_port,
+        hermes_api_key=settings.hermes_api_key,
+        image_path=settings.logmonitor_image_path,
+        start_script_path=settings.logmonitor_start_script_path,
+        known_hosts_path=settings.logmonitor_known_hosts_path,
+        preflight_ttl_seconds=settings.logmonitor_preflight_ttl_seconds,
+    )
+)
 
 
 def utc_now() -> datetime:
@@ -214,6 +237,19 @@ DashboardUserId = Annotated[str, Depends(dashboard_user_id)]
 @app.exception_handler(DashboardAgentError)
 async def dashboard_agent_error_handler(_: Request, exc: DashboardAgentError) -> JSONResponse:
     return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+
+
+@app.exception_handler(RequestValidationError)
+async def request_validation_error_handler(
+    request: Request,
+    exc: RequestValidationError,
+) -> Response:
+    if request.url.path.startswith("/api/logmonitor/"):
+        return JSONResponse(
+            status_code=422,
+            content={"error": "LogMonitor 安装参数格式无效"},
+        )
+    return await request_validation_exception_handler(request, exc)
 
 
 @app.middleware("http")
@@ -496,6 +532,47 @@ async def health() -> dict[str, Any]:
 async def heartbeat(payload: HeartbeatRequest) -> Response:
     record_heartbeat(payload.ip, utc_now())
     return Response(status_code=204)
+
+
+@app.post("/api/logmonitor/preflight", response_model=None)
+async def logmonitor_preflight(
+    payload: LogMonitorPreflightRequest,
+    callback_host: str | None = Header(default=None, alias=CALLBACK_HOST_HEADER),
+    _: None = Depends(require_install_auth),
+) -> dict[str, object] | JSONResponse:
+    try:
+        return await asyncio.to_thread(
+            logmonitor_installer.preflight,
+            payload,
+            callback_host,
+        )
+    except InstallerError as exc:
+        return JSONResponse(status_code=exc.status_code, content={"error": str(exc)})
+
+
+@app.post("/api/logmonitor/installations", status_code=202, response_model=None)
+async def create_logmonitor_installation(
+    payload: LogMonitorInstallRequest,
+    callback_host: str | None = Header(default=None, alias=CALLBACK_HOST_HEADER),
+    _: None = Depends(require_install_auth),
+) -> dict[str, object] | JSONResponse:
+    try:
+        return logmonitor_installer.create_installation(payload, callback_host)
+    except InstallerError as exc:
+        return JSONResponse(status_code=exc.status_code, content={"error": str(exc)})
+
+
+@app.get("/api/logmonitor/installations/{job_id}", response_model=None)
+async def logmonitor_installation(
+    job_id: str,
+    _: None = Depends(require_install_auth),
+) -> dict[str, object] | JSONResponse:
+    if not re.fullmatch(r"[0-9a-f]{32}", job_id):
+        raise HTTPException(status_code=422, detail="Invalid installation job id")
+    try:
+        return logmonitor_installer.get_job(job_id)
+    except InstallerError as exc:
+        return JSONResponse(status_code=exc.status_code, content={"error": str(exc)})
 
 
 @app.get("/api/nodes")

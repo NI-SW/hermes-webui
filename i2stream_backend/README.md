@@ -33,6 +33,12 @@ Important variables:
 - `SESSION_HMAC_SECRET`: required server-only secret of at least 32 UTF-8 bytes. It derives an opaque Gateway session ID from browser `client_id` and `conversation`.
 - `GATEWAY_BRIDGE_TOKEN`: required bridge credential of at least 32 UTF-8 bytes. The Gateway plugin sends it as a Bearer token when connecting to `/internal/gateway`.
 - `WEBUI_FEEDBACK_BRIDGE_TOKEN`: dedicated server-to-server Bearer token shared by the 8787 WebUI service and this backend. Native WebUI feedback endpoints fail closed when it is unset.
+- `I2STREAM_INSTALL_INTERNAL_TOKEN`: server-to-server Bearer token for the LogMonitor installer. The 8787 facade and this backend must receive the same value; installer endpoints fail closed when it is empty.
+- `AGENT_PUBLIC_HOST`: optional IPv4 address advertised to installed nodes. When empty, the authenticated 8787 facade supplies the IPv4 Host from the browser's WebUI URL.
+- `AGENT_BASE_URL_PORT` / `AGENT_BACK_PORT`: ports used to derive `AGENT_BASE_URL` and `AGENT_BACK_URL`, defaulting to `8642` and `50091`.
+- `LOGMONITOR_IMAGE_PATH`: fixed node image archive, defaulting to `/app/data/image/i2up-stream-mcp.tar`. Deployments provide this directory through an external container mount.
+- `LOGMONITOR_START_SCRIPT_PATH`: fixed startup script embedded in the i2agent image at `/app/logmonitor-installer/start_stream_mcp.sh`.
+- `LOGMONITOR_KNOWN_HOSTS_PATH`: persistent OpenSSH host-key store used with `StrictHostKeyChecking=accept-new`.
 - Chat history SQLite file is stored at `/app/data/agent-console/chat.db`. `/app/data` is mounted to the host in container deployments.
 
 The DataCop endpoint, target `agent` project, credentials, 30-second request timeout, 32-job queue, and 900-second job TTL are built into `config.py`. DataCop environment variables are intentionally not read.
@@ -80,6 +86,37 @@ and current online state.
 
 Deletes one retained node record. The operation is idempotent; a later heartbeat
 from the same IP creates the record again.
+
+### `POST /api/logmonitor/preflight`
+
+Requires `Authorization: Bearer <I2STREAM_INSTALL_INTERNAL_TOKEN>` and the internal
+`X-I2Stream-Agent-Host` header unless `AGENT_PUBLIC_HOST` is configured. It accepts
+the target IPv4, SSH port/username/password, and the five `node.env` fields
+`STREAM_LOG_MONITOR`, `MCP_IADEBUG_USER`, `ACTIVE_HOME`, `STREAM_HOME`, and
+`STREAM_DATA_HOME`.
+
+The synchronous preflight checks SSH login, amd64 architecture, Docker access,
+required directories and tools, transfer disk space, the absence of an existing
+`mcp-server`, and target-to-Agent connectivity. A successful response contains a
+short-lived `preflight_id`, the two derived Agent URLs, and all check results. The
+password is not retained in the preflight record.
+
+### `POST /api/logmonitor/installations`
+
+Requires the same internal Bearer token and a matching, unexpired `preflight_id`.
+It returns HTTP 202 and an in-memory `job_id`. The installer re-runs preflight,
+uploads the fixed image, startup script and generated `node.env` using SCP, verifies
+the image SHA256 on the target, starts the container, and checks both container and
+LogMonitor process state. Only one active job is allowed per target IPv4. An existing
+`mcp-server` is not replaced.
+
+SSH passwords are passed to `sshpass` through `SSHPASS`; they are not placed in
+arguments, responses, job state, log messages, or generated `node.env` files.
+
+### `GET /api/logmonitor/installations/{job_id}`
+
+Returns the current in-memory installation state and checks. State is lost when the
+backend process restarts; an unknown job returns HTTP 404.
 
 ### `POST /api/agent/requests`
 

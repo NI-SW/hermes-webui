@@ -95,6 +95,21 @@ def _json_body(handler: FakeHandler) -> dict:
         ("GET", "/api/i2stream-console/reports", "/api/reports"),
         ("GET", "/api/i2stream-console/nodes", "/api/nodes"),
         (
+            "POST",
+            "/api/i2stream-console/logmonitor/preflight",
+            "/api/logmonitor/preflight",
+        ),
+        (
+            "POST",
+            "/api/i2stream-console/logmonitor/installations",
+            "/api/logmonitor/installations",
+        ),
+        (
+            "GET",
+            "/api/i2stream-console/logmonitor/installations/0123456789abcdef0123456789abcdef",
+            "/api/logmonitor/installations/0123456789abcdef0123456789abcdef",
+        ),
+        (
             "DELETE",
             "/api/i2stream-console/nodes/2001%3Adb8%3A%3A1",
             "/api/nodes/2001%3Adb8%3A%3A1",
@@ -139,6 +154,9 @@ def test_allowlist_maps_only_console_data_routes(method, webui_path, upstream_pa
         ("PATCH", "/api/i2stream-console/knowledge/files"),
         ("GET", "/api/i2stream-console/reports/abc/content"),
         ("GET", "/api/i2stream-console/knowledge/files/a%2Fb"),
+        ("GET", "/api/i2stream-console/logmonitor/preflight"),
+        ("POST", "/api/i2stream-console/logmonitor/installations/not-a-job"),
+        ("GET", "/api/i2stream-console/logmonitor/installations/not-a-job"),
     ],
 )
 def test_allowlist_rejects_protocol_and_malformed_routes(method, path):
@@ -229,6 +247,83 @@ def test_proxy_strips_browser_authority_and_injects_configured_bearer(monkeypatc
     }
     assert handler.status == 200
     assert _json_body(handler) == {"files": []}
+
+
+def test_install_facade_requires_webui_auth_internal_token_and_ipv4_host(monkeypatch):
+    from api import auth, i2stream_console
+
+    target = i2stream_console.resolve_proxy_target(
+        "POST",
+        urlparse("/api/i2stream-console/logmonitor/preflight"),
+    )
+    handler = FakeHandler(headers={"Host": "192.168.34.65:8787"})
+
+    monkeypatch.setattr(auth, "is_auth_enabled", lambda: False)
+    monkeypatch.setattr(i2stream_console, "I2STREAM_CONSOLE_BEARER_TOKEN", "x" * 32)
+    monkeypatch.setattr(i2stream_console, "I2STREAM_AGENT_PUBLIC_HOST", "")
+    with pytest.raises(i2stream_console.ProxyRouteError) as unauthenticated:
+        i2stream_console._install_callback_host(handler, target)
+    assert unauthenticated.value.status == 503
+
+    monkeypatch.setattr(auth, "is_auth_enabled", lambda: True)
+    monkeypatch.setattr(i2stream_console, "I2STREAM_CONSOLE_BEARER_TOKEN", None)
+    with pytest.raises(i2stream_console.ProxyRouteError) as unconfigured:
+        i2stream_console._install_callback_host(handler, target)
+    assert unconfigured.value.status == 503
+
+    monkeypatch.setattr(i2stream_console, "I2STREAM_CONSOLE_BEARER_TOKEN", "x" * 32)
+    assert i2stream_console._install_callback_host(handler, target) == "192.168.34.65"
+    for invalid_host in ("localhost:8787", "127.0.0.1:8787", "[::1]:8787", "bad host"):
+        with pytest.raises(i2stream_console.ProxyRouteError):
+            i2stream_console._install_callback_host(
+                FakeHandler(headers={"Host": invalid_host}),
+                target,
+            )
+
+    monkeypatch.setattr(i2stream_console, "I2STREAM_AGENT_PUBLIC_HOST", "10.20.30.40")
+    assert i2stream_console._install_callback_host(
+        FakeHandler(headers={"Host": "webui.example"}),
+        target,
+    ) is None
+
+
+def test_install_facade_injects_server_credentials_and_browser_access_host(monkeypatch):
+    from api import auth, i2stream_console
+
+    body = b'{"target_ip":"192.168.34.67"}'
+    response = FakeResponse(b'{"preflight_id":"abc"}')
+    opener = FakeOpener(response)
+    monkeypatch.setattr(auth, "is_auth_enabled", lambda: True)
+    monkeypatch.setattr(i2stream_console, "_upstream_opener", lambda _origin: opener)
+    monkeypatch.setattr(i2stream_console, "I2STREAM_CONSOLE_BASE_URL", "http://127.0.0.1:50091")
+    monkeypatch.setattr(i2stream_console, "I2STREAM_CONSOLE_BEARER_TOKEN", "internal-install-token")
+    monkeypatch.setattr(i2stream_console, "I2STREAM_AGENT_PUBLIC_HOST", "")
+    handler = FakeHandler(
+        body,
+        headers={
+            "Host": "192.168.34.65:8787",
+            "Content-Length": str(len(body)),
+            "Content-Type": "application/json",
+            "Authorization": "Bearer browser-token",
+            "X-I2Stream-Agent-Host": "203.0.113.10",
+            "X-Forwarded-Host": "attacker.example",
+        },
+    )
+
+    assert i2stream_console.handle_proxy(
+        handler,
+        urlparse("/api/i2stream-console/logmonitor/preflight"),
+        "POST",
+        read_request_body=True,
+    ) is True
+
+    request, _timeout = opener.requests[0]
+    sent = {key.lower(): value for key, value in request.header_items()}
+    assert request.data == body
+    assert sent["authorization"] == "Bearer internal-install-token"
+    assert sent["x-i2stream-agent-host"] == "192.168.34.65"
+    assert "x-forwarded-host" not in sent
+    assert "host" not in sent
 
 
 @pytest.mark.parametrize(

@@ -21,6 +21,15 @@ def require_proxy_auth(authorization: str | None = Header(default=None)) -> None
         raise HTTPException(status_code=401, detail="Invalid proxy authorization")
 
 
+def require_install_auth(authorization: str | None = Header(default=None)) -> None:
+    token = settings.i2stream_install_internal_token.get_secret_value()
+    if not token:
+        raise HTTPException(status_code=503, detail="LogMonitor installation is not configured")
+    expected = f"Bearer {token}"
+    if authorization is None or not secrets.compare_digest(authorization, expected):
+        raise HTTPException(status_code=401, detail="Invalid installation authorization")
+
+
 def require_webui_feedback_auth(
     authorization: str | None = Header(default=None),
 ) -> None:

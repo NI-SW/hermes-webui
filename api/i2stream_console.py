@@ -1,8 +1,9 @@
 """Authenticated same-origin facade for the i2Stream compatibility service.
 
 The WebUI server remains the browser-facing security boundary.  This module
-proxies only knowledge, reports, node status, and client-scoped conversation history;
-agent streaming and the internal gateway are intentionally not reachable.
+proxies only knowledge, reports, node status, LogMonitor installation, and
+client-scoped conversation history; agent streaming and the internal gateway
+are intentionally not reachable.
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from urllib.parse import (
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 from api.config import (
+    I2STREAM_AGENT_PUBLIC_HOST,
     I2STREAM_CONSOLE_BASE_URL,
     I2STREAM_CONSOLE_BEARER_TOKEN,
     I2STREAM_CONSOLE_TIMEOUT_SECONDS,
@@ -41,6 +43,7 @@ WEBUI_PREFIX = "/api/i2stream-console"
 STREAM_CHUNK_BYTES = 64 * 1024
 MAX_BUFFERED_RESPONSE_BYTES = 4 * 1024 * 1024
 MAX_SAFE_MESSAGE_ID = (1 << 53) - 1
+INSTALL_REQUEST_MAX_BYTES = 16 * 1024
 
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
 _CLIENT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
@@ -84,6 +87,7 @@ class ProxyTarget:
     upstream_query: str = ""
     extra_headers: dict[str, str] | None = None
     stream_response: bool = False
+    install_route: bool = False
 
     def __post_init__(self) -> None:
         if self.extra_headers is None:
@@ -192,6 +196,28 @@ def resolve_proxy_target(method: str, parsed) -> ProxyTarget:
     if not (path == WEBUI_PREFIX or path.startswith(WEBUI_PREFIX + "/")):
         raise ProxyRouteError("Not an i2Stream console route", status=404)
     suffix = path[len(WEBUI_PREFIX):]
+
+    if suffix == "/logmonitor/preflight":
+        if method != "POST":
+            raise ProxyRouteError("Method not allowed", status=405)
+        _require_no_query(parsed)
+        return ProxyTarget("/api/logmonitor/preflight", install_route=True)
+
+    if suffix == "/logmonitor/installations":
+        if method != "POST":
+            raise ProxyRouteError("Method not allowed", status=405)
+        _require_no_query(parsed)
+        return ProxyTarget("/api/logmonitor/installations", install_route=True)
+
+    match = re.fullmatch(r"/logmonitor/installations/([0-9a-f]{32})", suffix)
+    if match:
+        if method != "GET":
+            raise ProxyRouteError("Method not allowed", status=405)
+        _require_no_query(parsed)
+        return ProxyTarget(
+            f"/api/logmonitor/installations/{match.group(1)}",
+            install_route=True,
+        )
 
     if suffix == "/knowledge/files":
         if method not in {"GET", "POST"}:
@@ -305,7 +331,11 @@ def _upstream_opener(allowed_origin: str):
     return build_opener(ProxyHandler({}), RejectRedirectHandler)
 
 
-def _request_headers(handler, target: ProxyTarget) -> dict[str, str]:
+def _request_headers(
+    handler,
+    target: ProxyTarget,
+    callback_host: str | None = None,
+) -> dict[str, str]:
     headers: dict[str, str] = {}
     incoming = getattr(handler, "headers", None)
     if incoming and hasattr(incoming, "items"):
@@ -313,9 +343,58 @@ def _request_headers(handler, target: ProxyTarget) -> dict[str, str]:
             if str(name).lower() in _REQUEST_HEADER_ALLOWLIST:
                 headers[str(name)] = str(value)
     headers.update(target.extra_headers)
+    if callback_host is not None:
+        headers["X-I2Stream-Agent-Host"] = callback_host
     if I2STREAM_CONSOLE_BEARER_TOKEN:
         headers["Authorization"] = f"Bearer {I2STREAM_CONSOLE_BEARER_TOKEN}"
     return headers
+
+
+def _browser_access_ipv4(handler) -> str:
+    raw_host = str(handler.headers.get("Host", "")).strip()
+    if not raw_host or any(character.isspace() for character in raw_host):
+        raise ProxyRouteError(
+            "无法从浏览器访问地址确定 Agent IPv4，请配置 AGENT_PUBLIC_HOST",
+            status=400,
+        )
+    parts = urlsplit("//" + raw_host)
+    if (
+        not parts.hostname
+        or parts.username is not None
+        or parts.password is not None
+        or parts.path
+        or parts.query
+        or parts.fragment
+    ):
+        raise ProxyRouteError("浏览器访问地址不是有效的 IPv4 Host", status=400)
+    try:
+        _ = parts.port
+        address = ip_address(parts.hostname)
+    except ValueError:
+        raise ProxyRouteError(
+            "浏览器访问地址不是 IPv4，请配置 AGENT_PUBLIC_HOST",
+            status=400,
+        ) from None
+    if address.version != 4 or address.is_loopback or address.is_unspecified or address.is_multicast:
+        raise ProxyRouteError(
+            "浏览器访问地址必须是非回环单播 IPv4，请配置 AGENT_PUBLIC_HOST",
+            status=400,
+        )
+    return str(address)
+
+
+def _install_callback_host(handler, target: ProxyTarget) -> str | None:
+    if not target.install_route:
+        return None
+    from api.auth import is_auth_enabled
+
+    if not is_auth_enabled():
+        raise ProxyRouteError("启用 WebUI 登录保护后才能使用远程安装", status=503)
+    if not I2STREAM_CONSOLE_BEARER_TOKEN:
+        raise ProxyRouteError("LogMonitor 安装服务未配置内部凭据", status=503)
+    if I2STREAM_AGENT_PUBLIC_HOST:
+        return None
+    return _browser_access_ipv4(handler)
 
 
 def _read_request_body(handler, max_bytes: int) -> bytes:
@@ -459,12 +538,17 @@ def handle_proxy(
 
     try:
         target = resolve_proxy_target(method, parsed)
+        callback_host = _install_callback_host(handler, target)
         origin = _validated_upstream_origin()
         if read_request_body:
             request_limit = (
                 MAX_UPLOAD_BYTES
                 if method.upper() == "POST" and target.upstream_path == "/api/knowledge/files"
-                else MAX_BODY_BYTES
+                else (
+                    INSTALL_REQUEST_MAX_BYTES
+                    if target.install_route
+                    else MAX_BODY_BYTES
+                )
             )
             request_body = _read_request_body(handler, request_limit)
         else:
@@ -475,7 +559,7 @@ def handle_proxy(
         request = Request(
             upstream_url,
             data=request_body,
-            headers=_request_headers(handler, target),
+            headers=_request_headers(handler, target, callback_host),
             method=method.upper(),
         )
         opener = _upstream_opener(origin)

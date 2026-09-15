@@ -4,11 +4,12 @@
 const I2STREAM_API = '/api/i2stream-console';
 const I2STREAM_HISTORY_PAGE_SIZE = 30;
 const I2STREAM_NODES_POLL_INTERVAL_MS = 30_000;
-const I2STREAM_SECTIONS = new Set(['knowledge', 'reports', 'history', 'nodes']);
+const I2STREAM_INSTALL_POLL_INTERVAL_MS = 2_000;
+const I2STREAM_SECTIONS = new Set(['knowledge', 'reports', 'history', 'nodes', 'logmonitor']);
 const I2STREAM_CLIENT_ID_RE = /^[A-Za-z0-9_-]{16,128}$/;
 const _i2streamState = {
   section: 'knowledge',
-  loaded: {knowledge: false, reports: false, history: false, nodes: false},
+  loaded: {knowledge: false, reports: false, history: false, nodes: false, logmonitor: true},
   knowledgeFiles: [],
   selectedKnowledgeFileIds: new Set(),
   knowledgeDeleteInFlight: false,
@@ -30,6 +31,10 @@ const _i2streamState = {
   nodesFooterObserver: null,
   nodesBindingsReady: false,
   nodeDeleteInFlight: false,
+  logmonitorPreflight: null,
+  logmonitorRequestGeneration: 0,
+  logmonitorJobId: null,
+  logmonitorPollTimer: null,
 };
 
 function _i2ContractObject(value, label) {
@@ -155,6 +160,85 @@ function parseNodes(value) {
     return {ip, online: item.online, firstSeenAt, lastSeenAt};
   });
   return {offlineAfterSeconds: payload.offline_after_seconds, nodes};
+}
+
+function _i2LogmonitorCheck(raw, index, label) {
+  const item = _i2ContractObject(raw, `${label} check ${index}`);
+  const status = _i2ContractString(item.status, `${label} check ${index} status`);
+  if (!['passed', 'failed', 'pending', 'running', 'skipped'].includes(status)) {
+    throw new TypeError(`${label} check ${index} status is invalid`);
+  }
+  return {
+    name: _i2ContractString(item.name, `${label} check ${index} name`),
+    status,
+    message: _i2ContractString(item.message, `${label} check ${index} message`, true),
+  };
+}
+
+function parseLogmonitorPreflight(value) {
+  const payload = _i2ContractObject(value, 'LogMonitor preflight');
+  if (!Array.isArray(payload.checks) || payload.checks.length === 0) {
+    throw new TypeError('LogMonitor preflight checks must be a non-empty array');
+  }
+  const checks = payload.checks.map((item, index) => _i2LogmonitorCheck(item, index, 'LogMonitor preflight'));
+  return {
+    preflightId: _i2ContractString(payload.preflight_id, 'LogMonitor preflight id'),
+    targetIp: _i2ContractString(payload.target_ip, 'LogMonitor preflight target IP'),
+    agentBaseUrl: _i2ContractString(payload.agent_base_url, 'LogMonitor preflight AGENT_BASE_URL'),
+    agentBackUrl: _i2ContractString(payload.agent_back_url, 'LogMonitor preflight AGENT_BACK_URL'),
+    checks,
+    expiresAt: _i2ContractString(payload.expires_at, 'LogMonitor preflight expiry'),
+    passed: checks.every(check => check.status === 'passed'),
+  };
+}
+
+function parseLogmonitorInstallation(value, requireDetails = false) {
+  const payload = _i2ContractObject(value, 'LogMonitor installation');
+  const status = _i2ContractString(payload.status, 'LogMonitor installation status');
+  if (!['queued', 'running', 'completed', 'failed', 'cancelled'].includes(status)) {
+    throw new TypeError('LogMonitor installation status is invalid');
+  }
+  const result = {
+    jobId: _i2ContractString(payload.job_id, 'LogMonitor installation job id'),
+    status,
+    stage: _i2ContractString(payload.stage, 'LogMonitor installation stage'),
+    message: _i2ContractString(payload.message, 'LogMonitor installation message', true),
+    checks: [],
+  };
+  if (Object.prototype.hasOwnProperty.call(payload, 'checks')) {
+    if (!Array.isArray(payload.checks)) throw new TypeError('LogMonitor installation checks must be an array');
+    result.checks = payload.checks.map((item, index) => _i2LogmonitorCheck(item, index, 'LogMonitor installation'));
+  }
+  if (requireDetails) {
+    result.targetIp = _i2ContractString(payload.target_ip, 'LogMonitor installation target IP');
+    result.createdAt = _i2ContractString(payload.created_at, 'LogMonitor installation created time');
+    result.updatedAt = _i2ContractString(payload.updated_at, 'LogMonitor installation updated time');
+  }
+  return result;
+}
+
+function normalizeLogmonitorPayload(raw) {
+  const values = _i2ContractObject(raw, 'LogMonitor form');
+  const required = ['target_ip', 'ssh_username', 'MCP_IADEBUG_USER', 'ACTIVE_HOME', 'STREAM_HOME', 'STREAM_DATA_HOME'];
+  const payload = {};
+  required.forEach(name => {
+    payload[name] = _i2ContractString(values[name], `LogMonitor ${name}`).trim();
+    if (!payload[name]) throw new TypeError(`LogMonitor ${name} must not be blank`);
+  });
+  payload.ssh_password = _i2ContractString(values.ssh_password, 'LogMonitor ssh_password');
+  const port = Number(values.ssh_port);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new TypeError('LogMonitor ssh_port must be an integer from 1 to 65535');
+  }
+  if (String(values.STREAM_LOG_MONITOR) !== '1') {
+    throw new TypeError('LogMonitor STREAM_LOG_MONITOR must be 1');
+  }
+  ['ACTIVE_HOME', 'STREAM_HOME', 'STREAM_DATA_HOME'].forEach(name => {
+    if (!payload[name].startsWith('/')) throw new TypeError(`LogMonitor ${name} must be an absolute path`);
+  });
+  payload.ssh_port = port;
+  payload.STREAM_LOG_MONITOR = String(values.STREAM_LOG_MONITOR);
+  return payload;
 }
 
 async function deleteNodeRequest(ip) {
@@ -497,6 +581,235 @@ function _i2SetStatus(id, message, kind = '') {
   element.dataset.kind = kind;
 }
 
+function _i2LogmonitorFormPayload() {
+  const form = document.getElementById('i2streamLogmonitorForm');
+  if (!form) throw new Error('LogMonitor form is unavailable');
+  if (!form.reportValidity()) throw new TypeError(_i2Text('i2stream_logmonitor_invalid_form'));
+  const values = {};
+  new FormData(form).forEach((value, key) => { values[key] = value; });
+  return normalizeLogmonitorPayload(values);
+}
+
+function redactLogmonitorText(value, password) {
+  const message = String(value);
+  return password ? message.split(password).join('••••••') : message;
+}
+
+function _i2LogmonitorRedact(value) {
+  const password = document.getElementById('i2streamLogmonitorSshPassword')?.value;
+  return redactLogmonitorText(value, password);
+}
+
+function _i2InvalidateLogmonitorPreflight(preserveResult = false) {
+  _i2streamState.logmonitorRequestGeneration += 1;
+  _i2streamState.logmonitorPreflight = null;
+  const install = document.getElementById('i2streamLogmonitorInstallBtn');
+  if (install) install.disabled = true;
+  const validity = document.getElementById('i2streamLogmonitorValidity');
+  if (validity) validity.textContent = _i2Text('i2stream_logmonitor_preflight_required');
+  if (preserveResult !== true) {
+    const result = document.getElementById('i2streamLogmonitorResult');
+    if (result) result.hidden = true;
+  }
+}
+
+function _i2SetLogmonitorBusy(busy) {
+  const form = document.getElementById('i2streamLogmonitorForm');
+  if (form) form.querySelectorAll('input, select, button').forEach(control => { control.disabled = busy; });
+  const install = document.getElementById('i2streamLogmonitorInstallBtn');
+  if (install && !busy) install.disabled = !_i2streamState.logmonitorPreflight?.passed;
+}
+
+function _i2RenderLogmonitorChecks(checks) {
+  const container = document.getElementById('i2streamLogmonitorChecks');
+  if (!container) return;
+  container.replaceChildren();
+  checks.forEach(check => {
+    const row = document.createElement('div');
+    row.className = `i2stream-install-check ${check.status}`;
+    row.setAttribute('role', 'listitem');
+    const mark = document.createElement('span');
+    mark.className = 'i2stream-install-check-mark';
+    mark.setAttribute('aria-hidden', 'true');
+    mark.textContent = check.status === 'passed' ? '✓' : (check.status === 'failed' ? '×' : '•');
+    const body = document.createElement('span');
+    const name = document.createElement('strong');
+    name.textContent = _i2LogmonitorRedact(check.name);
+    const message = document.createElement('small');
+    message.textContent = _i2LogmonitorRedact(check.message);
+    body.append(name, message);
+    row.append(mark, body);
+    container.appendChild(row);
+  });
+}
+
+function _i2ShowLogmonitorResult() {
+  const result = document.getElementById('i2streamLogmonitorResult');
+  if (result) result.hidden = false;
+}
+
+function _i2RenderLogmonitorPreflight(preflight) {
+  _i2ShowLogmonitorResult();
+  const urls = document.getElementById('i2streamLogmonitorUrls');
+  if (urls) urls.hidden = false;
+  const baseUrl = document.getElementById('i2streamLogmonitorBaseUrl');
+  const backUrl = document.getElementById('i2streamLogmonitorBackUrl');
+  if (baseUrl) baseUrl.textContent = preflight.agentBaseUrl;
+  if (backUrl) backUrl.textContent = preflight.agentBackUrl;
+  _i2RenderLogmonitorChecks(preflight.checks);
+  const state = document.getElementById('i2streamLogmonitorState');
+  if (state) {
+    state.className = `i2stream-install-state ${preflight.passed ? 'passed' : 'failed'}`;
+    state.textContent = _i2Text(preflight.passed ? 'i2stream_logmonitor_preflight_passed' : 'i2stream_logmonitor_preflight_failed');
+  }
+  const status = preflight.passed
+    ? _i2Text('i2stream_logmonitor_preflight_ready')
+    : _i2Text('i2stream_logmonitor_preflight_fix');
+  _i2SetStatus('i2streamLogmonitorStatus', status, preflight.passed ? '' : 'error');
+  const validity = document.getElementById('i2streamLogmonitorValidity');
+  if (validity) validity.textContent = preflight.passed ? _i2Text('i2stream_logmonitor_preflight_valid') : '';
+}
+
+async function preflightI2StreamLogmonitor(event) {
+  event.preventDefault();
+  if (_i2streamState.logmonitorJobId !== null) return;
+  const generation = ++_i2streamState.logmonitorRequestGeneration;
+  let payload;
+  try {
+    payload = _i2LogmonitorFormPayload();
+  } catch (error) {
+    _i2SetStatus('i2streamLogmonitorStatus', error.message, 'error');
+    return;
+  }
+  _i2streamState.logmonitorPreflight = null;
+  _i2SetLogmonitorBusy(true);
+  _i2ShowLogmonitorResult();
+  _i2SetStatus('i2streamLogmonitorStatus', _i2Text('i2stream_logmonitor_preflight_running'));
+  try {
+    const preflight = parseLogmonitorPreflight(await api(`${I2STREAM_API}/logmonitor/preflight`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }));
+    if (generation !== _i2streamState.logmonitorRequestGeneration) return;
+    _i2streamState.logmonitorPreflight = preflight;
+    _i2RenderLogmonitorPreflight(preflight);
+  } catch (error) {
+    if (generation !== _i2streamState.logmonitorRequestGeneration) return;
+    _i2SetStatus('i2streamLogmonitorStatus', `${_i2Text('error_prefix')}${_i2LogmonitorRedact(error.message)}`, 'error');
+    const state = document.getElementById('i2streamLogmonitorState');
+    if (state) {
+      state.className = 'i2stream-install-state failed';
+      state.textContent = _i2Text('i2stream_logmonitor_preflight_failed');
+    }
+  } finally {
+    if (generation === _i2streamState.logmonitorRequestGeneration) _i2SetLogmonitorBusy(false);
+  }
+}
+
+function _i2RenderLogmonitorJob(job) {
+  _i2ShowLogmonitorResult();
+  const state = document.getElementById('i2streamLogmonitorState');
+  if (state) {
+    state.className = `i2stream-install-state ${job.status}`;
+    state.textContent = _i2Text(`i2stream_logmonitor_job_${job.status}`);
+  }
+  _i2SetStatus(
+    'i2streamLogmonitorStatus',
+    _i2LogmonitorRedact(job.message || _i2Text('i2stream_logmonitor_install_running')),
+    job.status === 'failed' || job.status === 'cancelled' ? 'error' : '',
+  );
+  if (job.checks.length) _i2RenderLogmonitorChecks(job.checks);
+  const progress = document.getElementById('i2streamLogmonitorProgress');
+  if (!progress) return;
+  progress.hidden = false;
+  progress.replaceChildren();
+  const item = document.createElement('li');
+  item.className = `i2stream-install-stage ${job.status}`;
+  const stage = document.createElement('strong');
+  stage.textContent = _i2LogmonitorRedact(job.stage);
+  const jobId = document.createElement('small');
+  jobId.textContent = _i2Text('i2stream_logmonitor_job_id', job.jobId);
+  item.append(stage, jobId);
+  progress.appendChild(item);
+}
+
+function _i2StopLogmonitorPolling() {
+  if (_i2streamState.logmonitorPollTimer === null) return;
+  clearTimeout(_i2streamState.logmonitorPollTimer);
+  _i2streamState.logmonitorPollTimer = null;
+}
+
+async function _i2PollLogmonitorJob(jobId, generation) {
+  if (generation !== _i2streamState.logmonitorRequestGeneration) return;
+  try {
+    const job = parseLogmonitorInstallation(
+      await api(`${I2STREAM_API}/logmonitor/installations/${encodeURIComponent(jobId)}`),
+      true,
+    );
+    if (generation !== _i2streamState.logmonitorRequestGeneration) return;
+    _i2RenderLogmonitorJob(job);
+    if (['completed', 'failed', 'cancelled'].includes(job.status)) {
+      _i2streamState.logmonitorJobId = null;
+      _i2StopLogmonitorPolling();
+      _i2SetLogmonitorBusy(false);
+      const password = document.getElementById('i2streamLogmonitorSshPassword');
+      if (password) password.value = '';
+      _i2InvalidateLogmonitorPreflight(true);
+      return;
+    }
+    _i2streamState.logmonitorPollTimer = setTimeout(
+      () => void _i2PollLogmonitorJob(jobId, generation),
+      I2STREAM_INSTALL_POLL_INTERVAL_MS,
+    );
+  } catch (error) {
+    if (generation !== _i2streamState.logmonitorRequestGeneration) return;
+    _i2SetStatus('i2streamLogmonitorStatus', `${_i2Text('error_prefix')}${_i2LogmonitorRedact(error.message)}`, 'error');
+    if (Number.isInteger(error.status) && error.status < 500) {
+      _i2streamState.logmonitorJobId = null;
+      _i2StopLogmonitorPolling();
+      _i2SetLogmonitorBusy(false);
+      _i2InvalidateLogmonitorPreflight(true);
+      return;
+    }
+    _i2streamState.logmonitorPollTimer = setTimeout(
+      () => void _i2PollLogmonitorJob(jobId, generation),
+      I2STREAM_INSTALL_POLL_INTERVAL_MS,
+    );
+  }
+}
+
+async function installI2StreamLogmonitor() {
+  const preflight = _i2streamState.logmonitorPreflight;
+  if (!preflight?.passed || _i2streamState.logmonitorJobId !== null) return;
+  let payload;
+  try {
+    payload = _i2LogmonitorFormPayload();
+  } catch (error) {
+    _i2InvalidateLogmonitorPreflight();
+    _i2SetStatus('i2streamLogmonitorStatus', error.message, 'error');
+    return;
+  }
+  payload.preflight_id = preflight.preflightId;
+  const generation = ++_i2streamState.logmonitorRequestGeneration;
+  _i2SetLogmonitorBusy(true);
+  _i2SetStatus('i2streamLogmonitorStatus', _i2Text('i2stream_logmonitor_install_starting'));
+  try {
+    const job = parseLogmonitorInstallation(await api(`${I2STREAM_API}/logmonitor/installations`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }));
+    if (generation !== _i2streamState.logmonitorRequestGeneration) return;
+    _i2streamState.logmonitorJobId = job.jobId;
+    _i2RenderLogmonitorJob(job);
+    await _i2PollLogmonitorJob(job.jobId, generation);
+  } catch (error) {
+    if (generation !== _i2streamState.logmonitorRequestGeneration) return;
+    _i2SetStatus('i2streamLogmonitorStatus', `${_i2Text('error_prefix')}${_i2LogmonitorRedact(error.message)}`, 'error');
+    _i2SetLogmonitorBusy(false);
+    _i2InvalidateLogmonitorPreflight(true);
+  }
+}
+
 function _i2RenderFailure(containerId, statusId, error) {
   const message = error instanceof Error ? error.message : String(error);
   _i2SetStatus(statusId, `${_i2Text('error_prefix')}${message}`, 'error');
@@ -517,6 +830,12 @@ function _i2EnsureBindings() {
   if (history) history.addEventListener('keydown', _i2HistoryKeydown);
   const sectionTabs = document.querySelector('.i2stream-side-menu');
   if (sectionTabs) sectionTabs.addEventListener('keydown', _i2SectionKeydown);
+  const logmonitorForm = document.getElementById('i2streamLogmonitorForm');
+  if (logmonitorForm) {
+    logmonitorForm.addEventListener('input', _i2InvalidateLogmonitorPreflight);
+    logmonitorForm.addEventListener('change', _i2InvalidateLogmonitorPreflight);
+    _i2InvalidateLogmonitorPreflight();
+  }
   _i2streamState.bindingsReady = true;
 }
 
@@ -557,7 +876,7 @@ async function switchI2StreamSection(section, force = false) {
   });
   const title = document.getElementById('i2streamMainTitle');
   if (title) {
-    const key = {knowledge:'i2stream_knowledge',reports:'i2stream_reports',history:'i2stream_history',nodes:'i2stream_nodes'}[section];
+    const key = {knowledge:'i2stream_knowledge',reports:'i2stream_reports',history:'i2stream_history',nodes:'i2stream_nodes',logmonitor:'i2stream_logmonitor'}[section];
     title.dataset.i18n = key;
     title.textContent = _i2Text(key);
   }
@@ -569,7 +888,9 @@ async function switchI2StreamSection(section, force = false) {
   if (scopeExplainer) {
     const key = section === 'nodes'
       ? 'i2stream_nodes_explainer'
-      : (scoped ? 'i2stream_client_explainer' : 'i2stream_global_explainer');
+      : (section === 'logmonitor'
+        ? 'i2stream_logmonitor_explainer'
+        : (scoped ? 'i2stream_client_explainer' : 'i2stream_global_explainer'));
     scopeExplainer.dataset.i18n = key;
     scopeExplainer.textContent = _i2Text(key);
   }
@@ -1158,6 +1479,10 @@ window.__i2streamConsoleTest = {
   conversationPageUrl,
   conversationDetailUrl,
   parseNodes,
+  parseLogmonitorPreflight,
+  parseLogmonitorInstallation,
+  normalizeLogmonitorPayload,
+  redactLogmonitorText,
   deleteNodeRequest,
   deleteI2StreamNode,
   loadI2StreamNodes,

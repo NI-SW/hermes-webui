@@ -56,7 +56,7 @@ def test_i2stream_has_desktop_mobile_sidebar_and_main_surfaces():
     assert INDEX.count('src="static/i2.ico?v=__WEBUI_VERSION__"') == 2
     assert 'id="panelI2stream"' in INDEX
     assert 'id="mainI2stream"' in INDEX
-    for section in ("knowledge", "reports", "history", "nodes"):
+    for section in ("knowledge", "reports", "history", "nodes", "logmonitor"):
         assert f'data-i2stream-section="{section}"' in INDEX
     assert 'id="i2streamKnowledgeUpload"' in INDEX
     assert 'id="i2streamMainContent"' in INDEX
@@ -65,13 +65,13 @@ def test_i2stream_has_desktop_mobile_sidebar_and_main_surfaces():
     assert 'onsubmit="submitI2StreamHistoryClientId(event)"' in INDEX
     assert 'id="i2streamNodesList"' in INDEX
     assert 'id="i2streamNodesStatus"' in INDEX
-    for section in ("Knowledge", "Reports", "History", "Nodes"):
+    for section in ("Knowledge", "Reports", "History", "Nodes", "Logmonitor"):
         assert f'id="i2stream{section}Tab"' in INDEX
         assert f'aria-controls="i2stream{section}Page"' in INDEX
         assert f'id="i2stream{section}Page" role="tabpanel"' in INDEX
         assert f'aria-labelledby="i2stream{section}Tab"' in INDEX
     assert 'id="i2streamKnowledgeTab" role="tab" tabindex="0"' in INDEX
-    for section in ("Reports", "History", "Nodes"):
+    for section in ("Reports", "History", "Nodes", "Logmonitor"):
         assert f'id="i2stream{section}Tab" role="tab" tabindex="-1"' in INDEX
     source = MODULE_PATH.read_text(encoding="utf-8")
     for key in ("ArrowRight", "ArrowDown", "ArrowLeft", "ArrowUp", "Home", "End"):
@@ -85,6 +85,137 @@ def test_knowledge_view_exposes_batch_selection_controls():
     assert 'id="i2streamKnowledgeSelectionCount"' in INDEX
     assert 'id="i2streamKnowledgeDeleteSelected"' in INDEX
     assert 'onclick="deleteSelectedI2StreamKnowledge()"' in INDEX
+
+
+def test_logmonitor_view_collects_only_the_installation_inputs_and_defaults():
+    expected = {
+        "target_ip": None,
+        "ssh_port": "22",
+        "ssh_username": None,
+        "ssh_password": None,
+        "STREAM_LOG_MONITOR": "1",
+        "MCP_IADEBUG_USER": "root",
+        "ACTIVE_HOME": "/root/ia",
+        "STREAM_HOME": "/root/i2stream",
+        "STREAM_DATA_HOME": "/var/iadata",
+    }
+    page = INDEX[INDEX.index('id="i2streamLogmonitorPage"') :]
+    page = page[: page.index("</section>") + len("</section>")]
+    for name, default in expected.items():
+        field = re.search(rf'<(?:input|select)[^>]*name="{re.escape(name)}"[^>]*>', page)
+        assert field, f"missing LogMonitor field {name}"
+        if default is not None and name != "STREAM_LOG_MONITOR":
+            assert f'value="{default}"' in field.group(0)
+    assert '<option value="1"' in page
+    assert 'id="i2streamLogmonitorSshPassword"' in page
+    assert 'type="password"' in page
+    assert 'autocomplete="off"' in page
+    assert 'name="AGENT_BACK_URL"' not in page
+    assert 'name="AGENT_BASE_URL"' not in page
+    assert 'name="AGENT_API_KEY"' not in page
+    assert 'id="i2streamLogmonitorInstallBtn"' in page
+    assert "disabled data-i18n=\"i2stream_logmonitor_install\"" in page
+
+
+def test_logmonitor_contract_parses_preflight_and_job_without_secret_fields():
+    result = _run_contract_case(
+        """
+const preflight = c.parseLogmonitorPreflight({
+  preflight_id: 'pf-123', target_ip: '10.1.2.3',
+  agent_base_url: 'http://10.2.3.4:8642', agent_back_url: 'http://10.2.3.4:50091',
+  expires_at: '2026-09-14T12:00:00Z',
+  checks: [
+    {name: 'ssh', status: 'passed', message: 'connected'},
+    {name: 'docker', status: 'passed', message: 'available'}
+  ]
+});
+const job = c.parseLogmonitorInstallation({
+  job_id: 'job-123', target_ip: '10.1.2.3', status: 'running', stage: 'loading_image',
+  message: 'Loading image', checks: [{name: 'sha256', status: 'passed', message: 'matched'}],
+  created_at: '2026-09-14T11:00:00Z', updated_at: '2026-09-14T11:01:00Z'
+}, true);
+output = {preflight, job};
+"""
+    )
+    assert result == {
+        "preflight": {
+            "preflightId": "pf-123",
+            "targetIp": "10.1.2.3",
+            "agentBaseUrl": "http://10.2.3.4:8642",
+            "agentBackUrl": "http://10.2.3.4:50091",
+            "checks": [
+                {"name": "ssh", "status": "passed", "message": "connected"},
+                {"name": "docker", "status": "passed", "message": "available"},
+            ],
+            "expiresAt": "2026-09-14T12:00:00Z",
+            "passed": True,
+        },
+        "job": {
+            "jobId": "job-123",
+            "status": "running",
+            "stage": "loading_image",
+            "message": "Loading image",
+            "checks": [{"name": "sha256", "status": "passed", "message": "matched"}],
+            "targetIp": "10.1.2.3",
+            "createdAt": "2026-09-14T11:00:00Z",
+            "updatedAt": "2026-09-14T11:01:00Z",
+        },
+    }
+
+
+def test_logmonitor_payload_keeps_password_exact_and_validates_runtime_paths():
+    result = _run_contract_case(
+        """
+const raw = {
+  target_ip: ' 10.1.2.3 ', ssh_port: '22', ssh_username: ' root ',
+  ssh_password: ' password with spaces ', STREAM_LOG_MONITOR: '1',
+  MCP_IADEBUG_USER: ' root ', ACTIVE_HOME: ' /root/ia ',
+  STREAM_HOME: ' /root/i2stream ', STREAM_DATA_HOME: ' /var/iadata '
+};
+const payload = c.normalizeLogmonitorPayload(raw);
+let relativePathRejected = false;
+try { c.normalizeLogmonitorPayload({...raw, ACTIVE_HOME: 'relative/path'}); }
+catch (error) { relativePathRejected = error.name === 'TypeError'; }
+output = {payload, relativePathRejected};
+"""
+    )
+    assert result == {
+        "payload": {
+            "target_ip": "10.1.2.3",
+            "ssh_username": "root",
+            "ssh_password": " password with spaces ",
+            "MCP_IADEBUG_USER": "root",
+            "ACTIVE_HOME": "/root/ia",
+            "STREAM_HOME": "/root/i2stream",
+            "STREAM_DATA_HOME": "/var/iadata",
+            "ssh_port": 22,
+            "STREAM_LOG_MONITOR": "1",
+        },
+        "relativePathRejected": True,
+    }
+
+
+def test_logmonitor_secret_is_redacted_and_never_persisted_or_put_in_url():
+    result = _run_contract_case(
+        """
+output = {
+  redacted: c.redactLogmonitorText('SSH failed for secret-value at target', 'secret-value'),
+  unchanged: c.redactLogmonitorText('SSH failed at target', 'secret-value')
+};
+"""
+    )
+    assert result == {
+        "redacted": "SSH failed for •••••• at target",
+        "unchanged": "SSH failed at target",
+    }
+    source = MODULE_PATH.read_text(encoding="utf-8")
+    assert "localStorage" not in source
+    assert "console.log" not in source
+    assert "logmonitor/preflight?" not in source
+    assert "logmonitor/installations?" not in source
+    assert "JSON.stringify(payload)" in source
+    assert "logmonitorForm.addEventListener('input', _i2InvalidateLogmonitorPreflight)" in source
+    assert "logmonitorForm.addEventListener('change', _i2InvalidateLogmonitorPreflight)" in source
 
 
 def test_panel_switch_wires_i2stream_into_existing_navigation_lifecycle():

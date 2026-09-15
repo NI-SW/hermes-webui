@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from ipaddress import IPv4Address
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -34,6 +35,18 @@ class Settings(BaseSettings):
     session_hmac_secret: SecretStr
     gateway_bridge_token: SecretStr
     webui_feedback_bridge_token: SecretStr = SecretStr("")
+    i2stream_install_internal_token: SecretStr = SecretStr("")
+    agent_public_host: str = ""
+    agent_base_url_port: int = Field(default=8642, ge=1, le=65535)
+    agent_back_port: int = Field(default=50091, ge=1, le=65535)
+    logmonitor_image_path: Path = Path("/app/data/image/i2up-stream-mcp.tar")
+    logmonitor_start_script_path: Path = Path(
+        "/app/logmonitor-installer/start_stream_mcp.sh"
+    )
+    logmonitor_known_hosts_path: Path = Path(
+        "/app/data/agent-console/logmonitor-ssh/known_hosts"
+    )
+    logmonitor_preflight_ttl_seconds: int = Field(default=300, ge=30, le=1800)
 
     @field_validator("session_hmac_secret", "gateway_bridge_token", mode="before")
     @classmethod
@@ -51,6 +64,30 @@ class Settings(BaseSettings):
             return value
         if not isinstance(raw_value, str) or len(raw_value.encode("utf-8")) < 32:
             raise ValueError("configured WebUI feedback bridge token must contain at least 32 UTF-8 bytes")
+        return value
+
+    @field_validator("agent_public_host")
+    @classmethod
+    def validate_agent_public_host(cls, value: str) -> str:
+        host = value.strip()
+        if not host:
+            return ""
+        try:
+            address = IPv4Address(host)
+        except ValueError:
+            raise ValueError("AGENT_PUBLIC_HOST must be an IPv4 address") from None
+        if address.is_loopback or address.is_unspecified or address.is_multicast:
+            raise ValueError("AGENT_PUBLIC_HOST must be a non-loopback unicast IPv4 address")
+        return str(address)
+
+    @field_validator("i2stream_install_internal_token", mode="before")
+    @classmethod
+    def validate_install_token(cls, value: object) -> object:
+        raw_value = value.get_secret_value() if isinstance(value, SecretStr) else value
+        if raw_value == "":
+            return value
+        if not isinstance(raw_value, str) or len(raw_value.encode("utf-8")) < 32:
+            raise ValueError("I2STREAM_INSTALL_INTERNAL_TOKEN must contain at least 32 UTF-8 bytes")
         return value
 
     @field_validator("hermes_base_url", "dashboard_hermes_base_url", "vector_search_host")

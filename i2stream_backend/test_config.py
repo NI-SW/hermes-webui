@@ -152,6 +152,47 @@ class VectorSearchHostConfigTests(unittest.TestCase):
             {("webui_feedback_bridge_token",)},
         )
 
+    def test_logmonitor_install_configuration_is_strict_and_redacted(self) -> None:
+        settings = Settings(
+            _env_file=None,
+            vector_search_host="http://127.0.0.1:8900",
+            i2stream_install_internal_token="install-token-at-least-32-bytes-long",
+            agent_public_host="192.168.34.65",
+            agent_base_url_port=18642,
+            agent_back_port=15091,
+            **self.secret_settings,
+        )
+
+        self.assertEqual(settings.agent_public_host, "192.168.34.65")
+        self.assertEqual(settings.agent_base_url_port, 18642)
+        self.assertEqual(settings.agent_back_port, 15091)
+        self.assertEqual(
+            settings.logmonitor_image_path,
+            Path("/app/data/image/i2up-stream-mcp.tar"),
+        )
+        self.assertEqual(
+            settings.logmonitor_start_script_path,
+            Path("/app/logmonitor-installer/start_stream_mcp.sh"),
+        )
+        self.assertNotIn("install-token-at-least-32-bytes-long", repr(settings))
+
+        for invalid in ("localhost", "::1", "127.0.0.1", "0.0.0.0"):
+            with self.subTest(invalid=invalid), self.assertRaises(ValidationError):
+                Settings(
+                    _env_file=None,
+                    vector_search_host="http://127.0.0.1:8900",
+                    agent_public_host=invalid,
+                    **self.secret_settings,
+                )
+
+        with self.assertRaises(ValidationError):
+            Settings(
+                _env_file=None,
+                vector_search_host="http://127.0.0.1:8900",
+                i2stream_install_internal_token="short",
+                **self.secret_settings,
+            )
+
     def test_datacop_uses_built_in_agent_project_defaults(self) -> None:
         settings = Settings(
             _env_file=None,

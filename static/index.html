@@ -373,6 +373,10 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="5" r="2.5"/><circle cx="5" cy="18" r="2.5"/><circle cx="19" cy="18" r="2.5"/><path d="M10.6 7.1 6.4 15.8M13.4 7.1l4.2 8.7M7.5 18h9"/></svg>
           <span data-i18n="i2stream_nodes">Node management</span>
         </button>
+        <button type="button" class="side-menu-item" id="i2streamLogmonitorTab" role="tab" tabindex="-1" aria-selected="false" aria-controls="i2streamLogmonitorPage" data-i2stream-section="logmonitor" onclick="switchI2StreamSection('logmonitor')">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="m7 9 2.5 2.5L7 14M12 14h5M9 21h6"/></svg>
+          <span data-i18n="i2stream_logmonitor">LogMonitor install</span>
+        </button>
       </div>
     </div>
     <!-- Settings panel (menu list; actual panes render in .main) -->
@@ -1024,6 +1028,46 @@
           <div class="i2stream-node-summary" id="i2streamNodesSummary"></div>
           <div class="i2stream-status" id="i2streamNodesStatus" role="status" aria-live="polite" tabindex="-1"></div>
           <div class="i2stream-collection" id="i2streamNodesList"></div>
+        </section>
+        <section class="i2stream-page" id="i2streamLogmonitorPage" role="tabpanel" data-i2stream-page="logmonitor" aria-labelledby="i2streamLogmonitorTab" hidden>
+          <form id="i2streamLogmonitorForm" class="i2stream-install-form" onsubmit="preflightI2StreamLogmonitor(event)" autocomplete="off">
+            <fieldset class="i2stream-install-card">
+              <legend><span class="i2stream-step-number" aria-hidden="true">1</span><span data-i18n="i2stream_logmonitor_target_title">Target connection</span></legend>
+              <div class="i2stream-install-grid connection">
+                <label class="i2stream-install-field"><span data-i18n="i2stream_logmonitor_target_ip">Target IP</span><input id="i2streamLogmonitorTargetIp" name="target_ip" type="text" inputmode="decimal" spellcheck="false" required placeholder="192.168.1.20" data-i18n-placeholder="i2stream_logmonitor_target_ip_placeholder"></label>
+                <label class="i2stream-install-field compact"><span data-i18n="i2stream_logmonitor_ssh_port">SSH port</span><input id="i2streamLogmonitorSshPort" name="ssh_port" type="number" inputmode="numeric" min="1" max="65535" value="22" required></label>
+                <label class="i2stream-install-field"><span data-i18n="i2stream_logmonitor_ssh_username">SSH username</span><input id="i2streamLogmonitorSshUsername" name="ssh_username" type="text" spellcheck="false" autocomplete="off" required></label>
+                <label class="i2stream-install-field"><span data-i18n="i2stream_logmonitor_ssh_password">SSH password</span><input id="i2streamLogmonitorSshPassword" name="ssh_password" type="password" autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore="true" required></label>
+              </div>
+            </fieldset>
+            <fieldset class="i2stream-install-card">
+              <legend><span class="i2stream-step-number" aria-hidden="true">2</span><span data-i18n="i2stream_logmonitor_runtime_title">LogMonitor parameters</span></legend>
+              <div class="i2stream-install-grid">
+                <label class="i2stream-install-field"><span data-i18n="i2stream_logmonitor_enabled">Enable log monitoring</span><select id="i2streamLogmonitorEnabled" name="STREAM_LOG_MONITOR" required><option value="1" data-i18n="i2stream_logmonitor_enabled_yes">Enabled</option></select></label>
+                <label class="i2stream-install-field"><span data-i18n="i2stream_logmonitor_iadebug_user">IADEBUG user</span><input id="i2streamLogmonitorIadebugUser" name="MCP_IADEBUG_USER" type="text" value="root" spellcheck="false" required></label>
+                <label class="i2stream-install-field"><span data-i18n="i2stream_logmonitor_active_home">Active home</span><input id="i2streamLogmonitorActiveHome" name="ACTIVE_HOME" type="text" value="/root/ia" spellcheck="false" required></label>
+                <label class="i2stream-install-field"><span data-i18n="i2stream_logmonitor_stream_home">Stream home</span><input id="i2streamLogmonitorStreamHome" name="STREAM_HOME" type="text" value="/root/i2stream" spellcheck="false" required></label>
+                <label class="i2stream-install-field wide"><span data-i18n="i2stream_logmonitor_data_home">Stream data home</span><input id="i2streamLogmonitorDataHome" name="STREAM_DATA_HOME" type="text" value="/var/iadata" spellcheck="false" required></label>
+              </div>
+            </fieldset>
+            <div class="i2stream-install-actions">
+              <button class="sm-btn" type="submit" id="i2streamLogmonitorPreflightBtn" data-i18n="i2stream_logmonitor_preflight">Check connection</button>
+              <button class="sm-btn i2stream-install-primary" type="button" id="i2streamLogmonitorInstallBtn" onclick="installI2StreamLogmonitor()" disabled data-i18n="i2stream_logmonitor_install">Install LogMonitor</button>
+              <span class="i2stream-install-validity" id="i2streamLogmonitorValidity" aria-live="polite"></span>
+            </div>
+          </form>
+          <section class="i2stream-install-result" id="i2streamLogmonitorResult" aria-labelledby="i2streamLogmonitorResultTitle" hidden>
+            <div class="i2stream-install-result-head">
+              <div><h3 id="i2streamLogmonitorResultTitle" data-i18n="i2stream_logmonitor_result_title">Preflight result</h3><div class="i2stream-status" id="i2streamLogmonitorStatus" role="status" aria-live="polite"></div></div>
+              <span class="i2stream-install-state" id="i2streamLogmonitorState"></span>
+            </div>
+            <dl class="i2stream-install-urls" id="i2streamLogmonitorUrls" hidden>
+              <div><dt>AGENT_BASE_URL</dt><dd id="i2streamLogmonitorBaseUrl"></dd></div>
+              <div><dt>AGENT_BACK_URL</dt><dd id="i2streamLogmonitorBackUrl"></dd></div>
+            </dl>
+            <div class="i2stream-install-checks" id="i2streamLogmonitorChecks" role="list"></div>
+            <ol class="i2stream-install-progress" id="i2streamLogmonitorProgress" aria-label="Installation progress" data-i18n-aria-label="i2stream_logmonitor_progress" hidden></ol>
+          </section>
         </section>
       </div>
     </div>
