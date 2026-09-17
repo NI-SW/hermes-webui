@@ -87,6 +87,419 @@ def test_knowledge_view_exposes_batch_selection_controls():
     assert 'onclick="deleteSelectedI2StreamKnowledge()"' in INDEX
 
 
+def test_knowledge_view_exposes_service_configuration_before_upload():
+    config_index = INDEX.index('id="i2streamKnowledgeConfig"')
+    upload_index = INDEX.index('id="i2streamKnowledgeUpload"')
+    assert config_index < upload_index
+    assert 'id="i2streamKnowledgeVectorHost"' in INDEX
+    assert 'name="vector_search_host"' in INDEX
+    assert 'id="i2streamKnowledgeRagMcpUrl"' in INDEX
+    assert 'name="rag_service_mcp_url"' in INDEX
+    assert 'onclick="checkI2StreamKnowledgeConfig()"' in INDEX
+    assert 'onsubmit="saveI2StreamKnowledgeConfig(event)"' in INDEX
+    assert 'id="i2streamKnowledgeUnconfigured"' in INDEX
+
+
+def test_knowledge_view_exposes_collection_selector_and_creator_before_upload():
+    collection_index = INDEX.index('id="i2streamKnowledgeCollections"')
+    upload_index = INDEX.index('id="i2streamKnowledgeUpload"')
+    assert collection_index < upload_index
+    assert 'id="i2streamKnowledgeCollectionSelect"' in INDEX
+    assert 'onchange="selectI2StreamKnowledgeCollection(this.value)"' in INDEX
+    assert 'id="i2streamKnowledgeCollectionCreate"' in INDEX
+    assert 'onsubmit="createI2StreamKnowledgeCollection(event)"' in INDEX
+    assert 'name="collection_name"' in INDEX
+
+
+def test_knowledge_collection_contract_is_strict_and_selects_default_then_preferred():
+    result = _run_contract_case(
+        """
+const collections = c.parseKnowledgeCollections({
+  code: 0, status: 'success', total: 2,
+  collections: [
+    {name: 'archive', points_count: 4, vectors_count: 4, status: 'green', schema: 'v1', is_default: false},
+    {name: 'documents', points_count: 8, vectors_count: 8, status: 'green', schema: 'v1', is_default: true}
+  ]
+});
+let malformedRejected = false;
+try {
+  c.parseKnowledgeCollections({
+    code: 0, status: 'success', total: 1,
+    collections: [{name: 'broken', points_count: 0, vectors_count: 0, status: 'green', schema: 'v1'}]
+  });
+} catch (error) { malformedRejected = error.name === 'TypeError'; }
+let emptyRejected = false;
+try { c.chooseKnowledgeCollection([], null); }
+catch (error) { emptyRejected = error.name === 'TypeError'; }
+output = {
+  collections,
+  defaultName: c.chooseKnowledgeCollection(collections, null),
+  preferredName: c.chooseKnowledgeCollection(collections, 'archive'),
+  malformedRejected,
+  emptyRejected
+};
+"""
+    )
+    assert result == {
+        "collections": [
+            {
+                "name": "archive",
+                "pointsCount": 4,
+                "vectorsCount": 4,
+                "status": "green",
+                "schema": "v1",
+                "isDefault": False,
+            },
+            {
+                "name": "documents",
+                "pointsCount": 8,
+                "vectorsCount": 8,
+                "status": "green",
+                "schema": "v1",
+                "isDefault": True,
+            },
+        ],
+        "defaultName": "documents",
+        "preferredName": "archive",
+        "malformedRejected": True,
+        "emptyRejected": True,
+    }
+
+
+def test_knowledge_collection_create_and_scoped_urls_keep_collection_identity():
+    result = _run_contract_case(
+        """
+const calls = [];
+sandbox.api = async (url, options) => {
+  calls.push({url, method: options.method, body: JSON.parse(options.body)});
+  return {
+    code: 0, status: 'success',
+    collection: {collection_name: 'team docs', message: 'created'}
+  };
+};
+const created = await c.createKnowledgeCollectionRequest('  team docs  ');
+output = {
+  calls,
+  created,
+  filesUrl: c.knowledgeCollectionUrl('/knowledge/files', 'team docs'),
+  taskUrl: c.knowledgeCollectionUrl('/knowledge/tasks/task/a', 'team docs')
+};
+"""
+    )
+    assert result == {
+        "calls": [
+            {
+                "url": "/api/i2stream-console/knowledge/collections",
+                "method": "POST",
+                "body": {"collection_name": "team docs"},
+            }
+        ],
+        "created": {"name": "team docs", "message": "created"},
+        "filesUrl": "/api/i2stream-console/knowledge/files?collection_name=team+docs",
+        "taskUrl": "/api/i2stream-console/knowledge/tasks/task/a?collection_name=team+docs",
+    }
+
+
+def test_knowledge_file_contract_rejects_collection_mismatch():
+    result = _run_contract_case(
+        """
+const payload = {
+  code: 0, status: 'success', files: [{
+    file_id: 'file-a', display_name: 'A.pdf', file_type: 'pdf', file_size: 12,
+    upload_time: '2026-09-16T10:00:00Z', total_chunks: 2, collection_name: 'documents'
+  }]
+};
+const files = c.parseKnowledgeFiles(payload, 'documents');
+let mismatchRejected = false;
+try { c.parseKnowledgeFiles(payload, 'archive'); }
+catch (error) { mismatchRejected = error.name === 'TypeError'; }
+output = {files, mismatchRejected};
+"""
+    )
+    assert result == {
+        "files": [
+            {
+                "fileId": "file-a",
+                "displayName": "A.pdf",
+                "fileType": "pdf",
+                "fileSize": 12,
+                "uploadTime": "2026-09-16T10:00:00Z",
+                "totalChunks": 2,
+                "collectionName": "documents",
+            }
+        ],
+        "mismatchRejected": True,
+    }
+
+
+def test_knowledge_configuration_contract_parses_both_service_urls():
+    result = _run_contract_case(
+        """
+const configured = c.parseKnowledgeConfiguration({
+  code: 0,
+  status: 'success',
+  configuration: {
+    configured: true,
+    vector_search_host: 'http://192.168.34.65:8900',
+    rag_service_mcp_url: 'http://192.168.34.65:8900/mcp',
+    updated_at: '2026-09-16T10:00:00Z'
+  }
+});
+const empty = c.parseKnowledgeConfiguration({
+  code: 0,
+  status: 'success',
+  configuration: {
+    configured: false,
+    vector_search_host: '',
+    rag_service_mcp_url: '',
+    updated_at: null
+  }
+});
+output = {configured, empty};
+"""
+    )
+    assert result == {
+        "configured": {
+            "configured": True,
+            "vectorSearchHost": "http://192.168.34.65:8900",
+            "ragServiceMcpUrl": "http://192.168.34.65:8900/mcp",
+            "updatedAt": "2026-09-16T10:00:00Z",
+        },
+        "empty": {
+            "configured": False,
+            "vectorSearchHost": "",
+            "ragServiceMcpUrl": "",
+            "updatedAt": None,
+        },
+    }
+
+
+def test_knowledge_connection_check_accepts_ephemeral_configuration_without_update_time():
+    result = _run_contract_case(
+        """
+const checked = c.parseKnowledgeConnectionCheck({
+  code: 0,
+  status: 'success',
+  configuration: {
+    configured: true,
+    vector_search_host: 'http://rag.test:8900',
+    rag_service_mcp_url: 'http://rag.test:8900/mcp',
+    updated_at: null
+  },
+  checks: {
+    vector_search: {status: 'reachable', url: 'http://rag.test:8900/health'},
+    rag_service_mcp: {status: 'reachable', url: 'http://rag.test:8900/mcp'}
+  }
+});
+output = checked;
+"""
+    )
+    assert result == {
+        "configured": True,
+        "vectorSearchHost": "http://rag.test:8900",
+        "ragServiceMcpUrl": "http://rag.test:8900/mcp",
+        "updatedAt": None,
+    }
+
+
+def test_unconfigured_knowledge_service_skips_file_request_and_disables_file_controls():
+    result = _run_contract_case(
+        """
+const controls = {
+  i2streamKnowledgeConfigStatus: {textContent: '', dataset: {}},
+  i2streamKnowledgeStatus: {textContent: '', dataset: {}},
+  i2streamKnowledgeVectorHost: {value: 'stale'},
+  i2streamKnowledgeRagMcpUrl: {value: 'stale'},
+  i2streamKnowledgeConfigState: {className: '', textContent: '', dataset: {}},
+  i2streamKnowledgeUnconfigured: {hidden: true},
+  i2streamKnowledgeFile: {disabled: false},
+  i2streamKnowledgeUploadBtn: {disabled: false},
+  i2streamKnowledgeBatchActions: {hidden: false},
+  i2streamKnowledgeSelectAll: {checked: false, indeterminate: false, disabled: false},
+  i2streamKnowledgeSelectionCount: {textContent: ''},
+  i2streamKnowledgeDeleteSelected: {disabled: false},
+  i2streamKnowledgeList: {innerHTML: ''}
+};
+document.getElementById = id => controls[id] || null;
+let calls = 0;
+sandbox.api = async () => {
+  calls += 1;
+  return {
+    code: 0, status: 'success',
+    configuration: {configured: false, vector_search_host: '', rag_service_mcp_url: '', updated_at: null}
+  };
+};
+const loaded = await c.loadI2StreamKnowledge();
+output = {
+  loaded,
+  calls,
+  uploadDisabled: controls.i2streamKnowledgeUploadBtn.disabled,
+  fileDisabled: controls.i2streamKnowledgeFile.disabled,
+  warningHidden: controls.i2streamKnowledgeUnconfigured.hidden,
+  vectorValue: controls.i2streamKnowledgeVectorHost.value,
+  mcpValue: controls.i2streamKnowledgeRagMcpUrl.value
+};
+"""
+    )
+    assert result == {
+        "loaded": True,
+        "calls": 1,
+        "uploadDisabled": True,
+        "fileDisabled": True,
+        "warningHidden": False,
+        "vectorValue": "",
+        "mcpValue": "",
+    }
+
+
+def test_knowledge_save_persists_service_then_syncs_dedicated_hermes_mcp_endpoint():
+    result = _run_contract_case(
+        """
+const calls = [];
+sandbox.api = async (url, options) => {
+  calls.push({url, method: options.method, body: JSON.parse(options.body)});
+  if (url.endsWith('/knowledge/config')) {
+    return {
+      code: 0, status: 'success', mcp_reload_required: true,
+      configuration: {
+        configured: true,
+        vector_search_host: 'http://rag.test:8900',
+        rag_service_mcp_url: 'http://rag.test:8900/mcp',
+        updated_at: '2026-09-16T10:00:00Z'
+      }
+    };
+  }
+  return {
+    code: 0, status: 'success',
+    mcp: {
+      rag_service_mcp_url: 'http://rag.test:8900/mcp',
+      configured_profiles: ['default'],
+      missing_profiles: ['stream-qa'],
+      reload_required: true
+    }
+  };
+};
+const result = await c.saveKnowledgeConfigurationRequest({
+  vector_search_host: 'http://rag.test:8900',
+  rag_service_mcp_url: 'http://rag.test:8900/mcp'
+});
+output = {calls, result};
+"""
+    )
+    assert result == {
+        "calls": [
+            {
+                "url": "/api/i2stream-console/knowledge/config",
+                "method": "PUT",
+                "body": {
+                    "vector_search_host": "http://rag.test:8900",
+                    "rag_service_mcp_url": "http://rag.test:8900/mcp",
+                },
+            },
+            {
+                "url": "/api/rag-service-mcp",
+                "method": "PUT",
+                "body": {"rag_service_mcp_url": "http://rag.test:8900/mcp"},
+            },
+        ],
+        "result": {
+            "configuration": {
+                "configured": True,
+                "vectorSearchHost": "http://rag.test:8900",
+                "ragServiceMcpUrl": "http://rag.test:8900/mcp",
+                "updatedAt": "2026-09-16T10:00:00Z",
+            },
+            "mcp": {
+                "ragServiceMcpUrl": "http://rag.test:8900/mcp",
+                "configuredProfiles": ["default"],
+                "missingProfiles": ["stream-qa"],
+                "reloadRequired": True,
+            },
+            "mcpSyncError": None,
+        },
+    }
+
+
+def test_knowledge_save_reports_partial_success_when_hermes_mcp_sync_fails():
+    result = _run_contract_case(
+        """
+let calls = 0;
+sandbox.api = async (url) => {
+  calls += 1;
+  if (url === '/api/rag-service-mcp') throw new Error('profile write failed');
+  return {
+    code: 0, status: 'success', mcp_reload_required: true,
+    configuration: {
+      configured: true,
+      vector_search_host: 'http://rag.test:8900',
+      rag_service_mcp_url: 'http://rag.test:8900/mcp',
+      updated_at: '2026-09-16T10:00:00Z'
+    }
+  };
+};
+const saved = await c.saveKnowledgeConfigurationRequest({
+  vector_search_host: 'http://rag.test:8900',
+  rag_service_mcp_url: 'http://rag.test:8900/mcp'
+});
+output = {
+  calls,
+  configured: saved.configuration.configured,
+  mcp: saved.mcp,
+  error: saved.mcpSyncError.message
+};
+"""
+    )
+    assert result == {
+        "calls": 2,
+        "configured": True,
+        "mcp": None,
+        "error": "profile write failed",
+    }
+
+    i18n = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+    assert "服务地址已保存，但 Hermes MCP 配置同步失败" in i18n
+
+
+def test_knowledge_save_syncs_backend_normalized_mcp_url():
+    result = _run_contract_case(
+        """
+const calls = [];
+sandbox.api = async (url, options) => {
+  calls.push({url, body: JSON.parse(options.body)});
+  if (url.endsWith('/knowledge/config')) {
+    return {
+      code: 0, status: 'success',
+      configuration: {
+        configured: true,
+        vector_search_host: 'http://rag.test:8900',
+        rag_service_mcp_url: 'http://rag.test:8900/mcp',
+        updated_at: '2026-09-16T10:00:00Z'
+      }
+    };
+  }
+  return {
+    code: 0, status: 'success',
+    mcp: {
+      rag_service_mcp_url: 'http://rag.test:8900/mcp',
+      configured_profiles: ['default', 'stream-qa'],
+      missing_profiles: [],
+      reload_required: true
+    }
+  };
+};
+await c.saveKnowledgeConfigurationRequest({
+  vector_search_host: 'HTTP://RAG.TEST:8900/',
+  rag_service_mcp_url: 'HTTP://RAG.TEST:8900/mcp/'
+});
+output = calls;
+"""
+    )
+    assert result[1] == {
+        "url": "/api/rag-service-mcp",
+        "body": {"rag_service_mcp_url": "http://rag.test:8900/mcp"},
+    }
+
+
 def test_logmonitor_view_collects_only_the_installation_inputs_and_defaults():
     expected = {
         "target_ip": None,
@@ -110,6 +523,12 @@ def test_logmonitor_view_collects_only_the_installation_inputs_and_defaults():
     assert 'id="i2streamLogmonitorSshPassword"' in page
     assert 'type="password"' in page
     assert 'autocomplete="off"' in page
+    password = re.search(r'<input[^>]*id="i2streamLogmonitorSshPassword"[^>]*>', page)
+    assert password and "required" not in password.group(0)
+    private_key = re.search(r'<input[^>]*id="i2streamLogmonitorSshPrivateKey"[^>]*>', page)
+    assert private_key
+    assert 'type="file"' in private_key.group(0)
+    assert "accept=" not in private_key.group(0)
     assert 'name="AGENT_BACK_URL"' not in page
     assert 'name="AGENT_BASE_URL"' not in page
     assert 'name="AGENT_API_KEY"' not in page
@@ -163,7 +582,7 @@ output = {preflight, job};
     }
 
 
-def test_logmonitor_payload_keeps_password_exact_and_validates_runtime_paths():
+def test_logmonitor_payload_keeps_credentials_exact_omits_blanks_and_validates_runtime_paths():
     result = _run_contract_case(
         """
 const raw = {
@@ -173,10 +592,16 @@ const raw = {
   STREAM_HOME: ' /root/i2stream ', STREAM_DATA_HOME: ' /var/iadata '
 };
 const payload = c.normalizeLogmonitorPayload(raw);
+const keyOnly = c.normalizeLogmonitorPayload({
+  ...raw, ssh_password: '', ssh_private_key: '-----BEGIN OPENSSH PRIVATE KEY-----\\nkey material\\n-----END OPENSSH PRIVATE KEY-----\\n'
+});
 let relativePathRejected = false;
 try { c.normalizeLogmonitorPayload({...raw, ACTIVE_HOME: 'relative/path'}); }
 catch (error) { relativePathRejected = error.name === 'TypeError'; }
-output = {payload, relativePathRejected};
+let missingCredentialsRejected = false;
+try { c.normalizeLogmonitorPayload({...raw, ssh_password: '', ssh_private_key: ''}); }
+catch (error) { missingCredentialsRejected = error.name === 'TypeError'; }
+output = {payload, keyOnly, relativePathRejected, missingCredentialsRejected};
 """
     )
     assert result == {
@@ -191,8 +616,66 @@ output = {payload, relativePathRejected};
             "ssh_port": 22,
             "STREAM_LOG_MONITOR": "1",
         },
+        "keyOnly": {
+            "target_ip": "10.1.2.3",
+            "ssh_username": "root",
+            "ssh_private_key": "-----BEGIN OPENSSH PRIVATE KEY-----\nkey material\n-----END OPENSSH PRIVATE KEY-----\n",
+            "MCP_IADEBUG_USER": "root",
+            "ACTIVE_HOME": "/root/ia",
+            "STREAM_HOME": "/root/i2stream",
+            "STREAM_DATA_HOME": "/var/iadata",
+            "ssh_port": 22,
+            "STREAM_LOG_MONITOR": "1",
+        },
         "relativePathRejected": True,
+        "missingCredentialsRejected": True,
     }
+
+
+def test_logmonitor_private_key_reader_preserves_text_and_enforces_16kib_limit():
+    result = _run_contract_case(
+        """
+let reads = 0;
+const content = '  -----BEGIN OPENSSH PRIVATE KEY-----\\nkey\\n-----END OPENSSH PRIVATE KEY-----\\n';
+const privateKey = await c.readLogmonitorPrivateKey({
+  size: 16384,
+  text: async () => { reads += 1; return content; }
+});
+let oversizedRejected = false;
+try {
+  await c.readLogmonitorPrivateKey({
+    size: 16385,
+    text: async () => { reads += 1; return 'must not be read'; }
+  });
+} catch (error) {
+  oversizedRejected = error.name === 'TypeError';
+}
+output = {privateKey, reads, oversizedRejected};
+"""
+    )
+    assert result == {
+        "privateKey": "  -----BEGIN OPENSSH PRIVATE KEY-----\nkey\n-----END OPENSSH PRIVATE KEY-----\n",
+        "reads": 1,
+        "oversizedRejected": True,
+    }
+
+
+def test_logmonitor_credentials_are_cleared_together():
+    result = _run_contract_case(
+        """
+const controls = {
+  i2streamLogmonitorSshPassword: {value: 'secret'},
+  i2streamLogmonitorSshPrivateKey: {value: 'C:\\fakepath\\id_ed25519'}
+};
+document.getElementById = id => controls[id] || null;
+c.clearLogmonitorCredentials();
+output = {
+  password: controls.i2streamLogmonitorSshPassword.value,
+  privateKey: controls.i2streamLogmonitorSshPrivateKey.value
+};
+"""
+    )
+    assert result == {"password": "", "privateKey": ""}
 
 
 def test_logmonitor_secret_is_redacted_and_never_persisted_or_put_in_url():
@@ -214,6 +697,12 @@ output = {
     assert "logmonitor/preflight?" not in source
     assert "logmonitor/installations?" not in source
     assert "JSON.stringify(payload)" in source
+    state_definition = source[source.index("const _i2streamState = {"):source.index("};", source.index("const _i2streamState = {"))]
+    assert "privateKey" not in state_definition
+    assert source.count("payload = await _i2LogmonitorFormPayload();") == 2
+    install_start = source.index("async function installI2StreamLogmonitor()")
+    install_source = source[install_start:source.index("function _i2RenderFailure", install_start)]
+    assert install_source.index("await api(`${I2STREAM_API}/logmonitor/installations`") < install_source.index("_i2ClearLogmonitorCredentials();")
     assert "logmonitorForm.addEventListener('input', _i2InvalidateLogmonitorPreflight)" in source
     assert "logmonitorForm.addEventListener('change', _i2InvalidateLogmonitorPreflight)" in source
 
@@ -296,13 +785,13 @@ def test_knowledge_batch_delete_calls_every_selected_file_and_reports_partial_fa
 const calls = [];
 sandbox.api = async (url, options) => {
   calls.push({url, method: options.method});
-  if (url.endsWith('/file-beta')) throw new Error('backend unavailable');
+  if (url.includes('/file-beta?')) throw new Error('backend unavailable');
   return {code: 0, status: 'success'};
 };
 const deletion = await c.deleteKnowledgeFiles([
   {fileId: 'file-alpha', displayName: 'Alpha'},
   {fileId: 'file-beta', displayName: 'Beta'},
-]);
+], 'team docs');
 output = {
   calls,
   deletedFileIds: deletion.deletedFileIds,
@@ -313,11 +802,11 @@ output = {
     assert result == {
         "calls": [
             {
-                "url": "/api/i2stream-console/knowledge/files/file-alpha",
+                "url": "/api/i2stream-console/knowledge/files/file-alpha?collection_name=team+docs",
                 "method": "DELETE",
             },
             {
-                "url": "/api/i2stream-console/knowledge/files/file-beta",
+                "url": "/api/i2stream-console/knowledge/files/file-beta?collection_name=team+docs",
                 "method": "DELETE",
             },
         ],
@@ -329,6 +818,155 @@ output = {
                 "message": "backend unavailable",
             }
         ],
+    }
+
+
+def test_configured_knowledge_loads_default_collection_then_its_files():
+    result = _run_contract_case(
+        """
+const controls = {
+  i2streamKnowledgeConfigStatus: {textContent: '', dataset: {}},
+  i2streamKnowledgeStatus: {textContent: '', dataset: {}},
+  i2streamKnowledgeVectorHost: {value: ''},
+  i2streamKnowledgeRagMcpUrl: {value: ''},
+  i2streamKnowledgeConfigState: {className: '', textContent: '', dataset: {}},
+  i2streamKnowledgeUnconfigured: {hidden: true},
+  i2streamKnowledgeConfig: {querySelectorAll: () => []},
+  i2streamKnowledgeCollections: {hidden: true},
+  i2streamKnowledgeCollectionSelect: {disabled: false, innerHTML: '', value: ''},
+  i2streamKnowledgeCollectionName: {disabled: false, value: ''},
+  i2streamKnowledgeCollectionCreateBtn: {disabled: false},
+  i2streamKnowledgeFile: {disabled: false},
+  i2streamKnowledgeUploadBtn: {disabled: false},
+  i2streamKnowledgeBatchActions: {hidden: false},
+  i2streamKnowledgeSelectAll: {checked: false, indeterminate: false, disabled: false},
+  i2streamKnowledgeSelectionCount: {textContent: ''},
+  i2streamKnowledgeDeleteSelected: {disabled: false},
+  i2streamKnowledgeList: {innerHTML: ''}
+};
+document.getElementById = id => controls[id] || null;
+const calls = [];
+sandbox.api = async url => {
+  calls.push(url);
+  if (url.endsWith('/knowledge/config')) return {
+    code: 0, status: 'success', configuration: {
+      configured: true, vector_search_host: 'http://rag.test:8900',
+      rag_service_mcp_url: 'http://rag.test:8900/mcp', updated_at: '2026-09-16T10:00:00Z'
+    }
+  };
+  if (url.endsWith('/knowledge/collections')) return {
+    code: 0, status: 'success', total: 2, collections: [
+      {name: 'archive', points_count: 1, vectors_count: 1, status: 'green', schema: 'v1', is_default: false},
+      {name: 'documents', points_count: 2, vectors_count: 2, status: 'green', schema: 'v1', is_default: true}
+    ]
+  };
+  return {code: 0, status: 'success', files: []};
+};
+const loaded = await c.loadI2StreamKnowledge();
+output = {loaded, calls, selected: controls.i2streamKnowledgeCollectionSelect.value};
+"""
+    )
+    assert result == {
+        "loaded": True,
+        "calls": [
+            "/api/i2stream-console/knowledge/config",
+            "/api/i2stream-console/knowledge/collections",
+            "/api/i2stream-console/knowledge/files?collection_name=documents",
+        ],
+        "selected": "documents",
+    }
+
+
+def test_upload_polling_and_delete_keep_the_selected_collection():
+    result = _run_contract_case(
+        """
+const file = {name: 'guide.md', size: 12};
+const controls = {
+  i2streamKnowledgeConfigStatus: {textContent: '', dataset: {}},
+  i2streamKnowledgeStatus: {textContent: '', dataset: {}},
+  i2streamKnowledgeVectorHost: {value: ''},
+  i2streamKnowledgeRagMcpUrl: {value: ''},
+  i2streamKnowledgeConfigState: {className: '', textContent: '', dataset: {}},
+  i2streamKnowledgeUnconfigured: {hidden: true},
+  i2streamKnowledgeConfig: {querySelectorAll: () => []},
+  i2streamKnowledgeCollections: {hidden: true},
+  i2streamKnowledgeCollectionSelect: {disabled: false, innerHTML: '', value: ''},
+  i2streamKnowledgeCollectionName: {disabled: false, value: ''},
+  i2streamKnowledgeCollectionCreateBtn: {disabled: false},
+  i2streamKnowledgeFile: {disabled: false, files: [file], value: 'guide.md'},
+  i2streamKnowledgeFileLabel: {textContent: ''},
+  i2streamKnowledgeUploadBtn: {disabled: false},
+  i2streamKnowledgeBatchActions: {hidden: false},
+  i2streamKnowledgeSelectAll: {checked: false, indeterminate: false, disabled: false},
+  i2streamKnowledgeSelectionCount: {textContent: ''},
+  i2streamKnowledgeDeleteSelected: {disabled: false},
+  i2streamKnowledgeList: {innerHTML: ''}
+};
+document.getElementById = id => controls[id] || null;
+sandbox.MAX_UPLOAD_BYTES = 1024;
+sandbox.FormData = class {
+  constructor() { this.values = []; }
+  append(name, value) {
+    this.values.push([name, value && value.name ? value.name : value]);
+  }
+};
+sandbox.showConfirmDialog = async () => true;
+const operationCalls = [];
+let switchWhileUploading;
+sandbox.api = async (url, options = {}) => {
+  if (url.endsWith('/knowledge/config')) return {
+    code: 0, status: 'success', configuration: {
+      configured: true, vector_search_host: 'http://rag.test:8900',
+      rag_service_mcp_url: 'http://rag.test:8900/mcp', updated_at: '2026-09-16T10:00:00Z'
+    }
+  };
+  if (url.endsWith('/knowledge/collections')) return {
+    code: 0, status: 'success', total: 2, collections: [
+      {name: 'archive', points_count: 1, vectors_count: 1, status: 'green', schema: 'v1', is_default: false},
+      {name: 'documents', points_count: 2, vectors_count: 2, status: 'green', schema: 'v1', is_default: true}
+    ]
+  };
+  if (options.method === 'POST') {
+    operationCalls.push({url, method: options.method, form: options.body.values});
+    switchWhileUploading = await sandbox.selectI2StreamKnowledgeCollection('archive');
+    return {code: 0, status: 'success', file: {task_id: 'task-1'}};
+  }
+  if (url.includes('/knowledge/tasks/')) {
+    operationCalls.push({url, method: 'GET'});
+    return {code: 0, status: 'success', task: {status: 'completed', terminal: true}};
+  }
+  if (options.method === 'DELETE') {
+    operationCalls.push({url, method: options.method});
+    return {code: 0, status: 'success'};
+  }
+  return {code: 0, status: 'success', files: []};
+};
+await c.loadI2StreamKnowledge();
+await sandbox.uploadI2StreamKnowledge({preventDefault() {}});
+await sandbox.deleteI2StreamKnowledge('file/a', 'Guide');
+output = {
+  operationCalls,
+  switchWhileUploading,
+};
+"""
+    )
+    assert result == {
+        "operationCalls": [
+            {
+                "url": "/api/i2stream-console/knowledge/files",
+                "method": "POST",
+                "form": [["file", "guide.md"], ["collection_name", "documents"]],
+            },
+            {
+                "url": "/api/i2stream-console/knowledge/tasks/task-1?collection_name=documents",
+                "method": "GET",
+            },
+            {
+                "url": "/api/i2stream-console/knowledge/files/file%2Fa?collection_name=documents",
+                "method": "DELETE",
+            },
+        ],
+        "switchWhileUploading": False,
     }
 
 
@@ -355,6 +993,7 @@ output = {calls};
         "c.parseConversationDetail({code:0,status:'success',conversation_id:'x',messages:{}})",
         "c.parseConversationDetail({code:0,status:'success',conversation_id:'x',messages:[{id:0,role:'user',content:'x',created_at:'2026-01-01'}]})",
         "c.parseKnowledgeFiles({code:0,status:'success',files:{}})",
+        "c.parseKnowledgeConfiguration({code:0,status:'success',configuration:{configured:false,vector_search_host:null,rag_service_mcp_url:'',updated_at:null}})",
         "c.parseReports({code:0,status:'success',files:null,server_time:1})",
     ],
 )

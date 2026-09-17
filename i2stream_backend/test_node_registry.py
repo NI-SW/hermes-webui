@@ -11,7 +11,6 @@ from unittest.mock import patch
 import httpx
 from pydantic import ValidationError
 
-os.environ.setdefault("VECTOR_SEARCH_HOST", "http://127.0.0.1:8900")
 os.environ.setdefault("SESSION_HMAC_SECRET", "session-secret-32-bytes-for-tests!!")
 os.environ.setdefault("GATEWAY_BRIDGE_TOKEN", "gateway-token-32-bytes-for-tests!!!")
 

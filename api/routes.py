@@ -2916,6 +2916,7 @@ from api.config import (
     PENDING_GOAL_CONTINUATION,
     _get_config_path,
     _load_yaml_config_file,
+    _load_yaml_config_file_raw,
     _save_yaml_config_file,
     reload_config,
     get_config_for_profile_home,
@@ -17986,6 +17987,8 @@ def handle_put(handler, parsed) -> bool:
     body = read_body(handler)
     if not _guard_request_session_visibility(handler, parsed, body=body, method="PUT"):
         return True
+    if parsed.path == "/api/rag-service-mcp":
+        return _handle_i2stream_rag_mcp_update(handler, body)
     if parsed.path.startswith("/api/mcp/servers/"):
         name = parsed.path[len("/api/mcp/servers/"):]
         return _handle_mcp_server_update(handler, name, body)
@@ -29582,21 +29585,27 @@ def _handle_mcp_servers_list(handler):
     })
 
 
+def _load_mcp_config_for_update() -> dict:
+    """Read the active profile without expanding environment references."""
+    return _load_yaml_config_file_raw(_get_config_path())
+
+
 def _handle_mcp_server_delete(handler, name):
     """Delete an MCP server by name."""
     from urllib.parse import unquote
     name = unquote(name)
     if not name:
         return bad(handler, "name is required")
-    cfg = get_config()
-    servers = cfg.get("mcp_servers", {})
-    if not isinstance(servers, dict):
-        servers = {}
-    if name not in servers:
-        return bad(handler, f"MCP server '{name}' not found", 404)
-    del servers[name]
-    cfg["mcp_servers"] = servers
-    _save_yaml_config_file(_get_config_path(), cfg)
+    with _cfg_lock:
+        cfg = _load_mcp_config_for_update()
+        servers = cfg.get("mcp_servers", {})
+        if not isinstance(servers, dict):
+            servers = {}
+        if name not in servers:
+            return bad(handler, f"MCP server '{name}' not found", 404)
+        del servers[name]
+        cfg["mcp_servers"] = servers
+        _save_yaml_config_file(_get_config_path(), cfg)
     reload_config()
     return j(handler, {"ok": True, "deleted": name})
 
@@ -29610,17 +29619,18 @@ def _handle_mcp_server_toggle(handler, name, body):
     if "enabled" not in body:
         return bad(handler, "enabled field is required")
     enabled = bool(body["enabled"])
-    cfg = get_config()
-    servers = cfg.get("mcp_servers", {})
-    if not isinstance(servers, dict):
-        servers = {}
-    if name not in servers:
-        return bad(handler, f"MCP server '{name}' not found", 404)
-    if not isinstance(servers[name], dict):
-        return bad(handler, f"MCP server '{name}' has invalid config", 400)
-    servers[name]["enabled"] = enabled
-    cfg["mcp_servers"] = servers
-    _save_yaml_config_file(_get_config_path(), cfg)
+    with _cfg_lock:
+        cfg = _load_mcp_config_for_update()
+        servers = cfg.get("mcp_servers", {})
+        if not isinstance(servers, dict):
+            servers = {}
+        if name not in servers:
+            return bad(handler, f"MCP server '{name}' not found", 404)
+        if not isinstance(servers[name], dict):
+            return bad(handler, f"MCP server '{name}' has invalid config", 400)
+        servers[name]["enabled"] = enabled
+        cfg["mcp_servers"] = servers
+        _save_yaml_config_file(_get_config_path(), cfg)
     reload_config()
     return j(handler, {"ok": True, "name": name, "enabled": enabled})
 
@@ -29652,31 +29662,55 @@ def _handle_mcp_server_update(handler, name, body):
     if not name:
         return bad(handler, "name is required")
     # Validate: must have url (http) or command (stdio)
-    server_cfg = {}
-    cfg = get_config()
-    servers = cfg.get("mcp_servers", {})
-    if not isinstance(servers, dict):
-        servers = {}
-    existing_cfg = servers.get(name, {})
-    if body.get("url"):
-        server_cfg["url"] = body["url"].strip()
-        if body.get("headers"):
-            server_cfg["headers"] = _strip_masked_values(body["headers"], existing_cfg.get("headers", {}))
-    elif body.get("command"):
-        server_cfg["command"] = body["command"].strip()
-        if body.get("args"):
-            server_cfg["args"] = body["args"] if isinstance(body["args"], list) else [body["args"]]
-        if body.get("env"):
-            server_cfg["env"] = _strip_masked_values(body["env"], existing_cfg.get("env", {}))
-    else:
+    if not body.get("url") and not body.get("command"):
         return bad(handler, "url or command is required")
-    if body.get("timeout") is not None:
-        try:
-            server_cfg["timeout"] = int(body["timeout"])
-        except (ValueError, TypeError):
-            pass
-    servers[name] = server_cfg
-    cfg["mcp_servers"] = servers
-    _save_yaml_config_file(_get_config_path(), cfg)
+    with _cfg_lock:
+        server_cfg = {}
+        cfg = _load_mcp_config_for_update()
+        servers = cfg.get("mcp_servers", {})
+        if not isinstance(servers, dict):
+            servers = {}
+        existing_cfg = servers.get(name, {})
+        if not isinstance(existing_cfg, dict):
+            existing_cfg = {}
+        if body.get("url"):
+            server_cfg["url"] = body["url"].strip()
+            if body.get("headers"):
+                server_cfg["headers"] = _strip_masked_values(body["headers"], existing_cfg.get("headers", {}))
+        else:
+            server_cfg["command"] = body["command"].strip()
+            if body.get("args"):
+                server_cfg["args"] = body["args"] if isinstance(body["args"], list) else [body["args"]]
+            if body.get("env"):
+                server_cfg["env"] = _strip_masked_values(body["env"], existing_cfg.get("env", {}))
+        if body.get("timeout") is not None:
+            try:
+                server_cfg["timeout"] = int(body["timeout"])
+            except (ValueError, TypeError):
+                pass
+        servers[name] = server_cfg
+        cfg["mcp_servers"] = servers
+        _save_yaml_config_file(_get_config_path(), cfg)
     reload_config()
     return j(handler, {"ok": True, "server": _server_summary(name, server_cfg)})
+
+
+def _handle_i2stream_rag_mcp_update(handler, body):
+    """Configure the fixed RAG MCP server in the managed Hermes profiles."""
+    from api.auth import is_auth_enabled
+
+    if not is_auth_enabled():
+        return bad(handler, "启用 WebUI 登录保护后才能修改 RAG 服务配置", status=503)
+    if not isinstance(body, dict) or set(body) != {"rag_service_mcp_url"}:
+        return bad(handler, "rag_service_mcp_url is required and must be the only field")
+
+    from api.i2stream_rag_mcp import configure_rag_mcp_profiles
+
+    try:
+        result = configure_rag_mcp_profiles(body["rag_service_mcp_url"])
+    except ValueError as exc:
+        return bad(handler, str(exc))
+    except RuntimeError as exc:
+        logger.exception("Failed to update i2Stream RAG MCP profile configuration")
+        return bad(handler, str(exc), status=500)
+    return j(handler, {"code": 0, "status": "success", "mcp": result})

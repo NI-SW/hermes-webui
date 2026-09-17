@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import io
 import json
 import os
 import subprocess
+import struct
 import tarfile
 import tempfile
 import unittest
@@ -17,7 +19,6 @@ from fastapi import HTTPException
 from fastapi.exceptions import RequestValidationError
 from pydantic import SecretStr, ValidationError
 
-os.environ.setdefault("VECTOR_SEARCH_HOST", "http://127.0.0.1:8900")
 os.environ.setdefault("SESSION_HMAC_SECRET", "session-secret-32-bytes-for-tests!!")
 os.environ.setdefault("GATEWAY_BRIDGE_TOKEN", "gateway-token-32-bytes-for-tests!!!")
 
@@ -34,6 +35,10 @@ from models import LogMonitorInstallRequest, LogMonitorPreflightRequest
 
 
 PASSWORD = "password with spaces"
+PRIVATE_KEY = """-----BEGIN RSA PRIVATE KEY-----
+dGVzdC1wcml2YXRlLWtleQ==
+-----END RSA PRIVATE KEY-----
+"""
 
 
 def request_values(**overrides):
@@ -57,10 +62,22 @@ class FakeSSH:
         self.image_digest = image_digest
         self.scripts: list[str] = []
         self.uploads: list[tuple[str, str, bytes]] = []
-        self.passwords: list[str] = []
+        self.passwords: list[str | None] = []
+        self.auth_modes: list[str] = []
 
-    def run_script(self, target_ip, port, username, password, script, **_kwargs):
+    def run_script(
+        self,
+        target_ip,
+        port,
+        username,
+        password,
+        script,
+        *,
+        private_key=None,
+        **_kwargs,
+    ):
         self.passwords.append(password)
+        self.auth_modes.append("key" if private_key is not None else "password")
         self.scripts.append(script)
         if "emit()" in script:
             output = "\n".join(
@@ -74,8 +91,19 @@ class FakeSSH:
             output = ""
         return subprocess.CompletedProcess([], 0, output.encode(), b"")
 
-    def upload(self, target_ip, port, username, password, local_path, remote_path):
+    def upload(
+        self,
+        target_ip,
+        port,
+        username,
+        password,
+        local_path,
+        remote_path,
+        *,
+        private_key=None,
+    ):
         self.passwords.append(password)
+        self.auth_modes.append("key" if private_key is not None else "password")
         path = Path(local_path)
         self.uploads.append((path.name, remote_path, path.read_bytes()))
 
@@ -197,6 +225,63 @@ class LogMonitorInstallerTests(unittest.TestCase):
                 with self.assertRaises(ValidationError):
                     LogMonitorPreflightRequest(**request_values(**invalid))
 
+    def test_request_accepts_exactly_one_or_both_ssh_credentials(self) -> None:
+        password_only = LogMonitorPreflightRequest(**request_values())
+        key_only = LogMonitorPreflightRequest(
+            **request_values(ssh_password=None, ssh_private_key=PRIVATE_KEY)
+        )
+        both = LogMonitorPreflightRequest(
+            **request_values(ssh_private_key=PRIVATE_KEY)
+        )
+
+        self.assertEqual(password_only.ssh_password.get_secret_value(), PASSWORD)
+        self.assertIsNone(password_only.ssh_private_key)
+        self.assertIsNone(key_only.ssh_password)
+        self.assertEqual(key_only.ssh_private_key.get_secret_value(), PRIVATE_KEY)
+        self.assertEqual(both.ssh_password.get_secret_value(), PASSWORD)
+        self.assertEqual(both.ssh_private_key.get_secret_value(), PRIVATE_KEY)
+        self.assertNotIn(PRIVATE_KEY, repr(key_only))
+        with self.assertRaises(ValidationError):
+            LogMonitorPreflightRequest(
+                **request_values(ssh_password=None, ssh_private_key=None)
+            )
+
+    def test_request_rejects_invalid_or_encrypted_private_keys(self) -> None:
+        openssh_blob = b"openssh-key-v1\x00" + struct.pack(">I", 10) + b"aes256-ctr"
+        encrypted_openssh_key = (
+            "-----BEGIN OPENSSH PRIVATE KEY-----\n"
+            + base64.b64encode(openssh_blob).decode("ascii")
+            + "\n-----END OPENSSH PRIVATE KEY-----\n"
+        )
+        invalid_keys = (
+            "",
+            "private\x00key",
+            "x" * (16 * 1024 + 1),
+            "-----BEGIN ENCRYPTED PRIVATE KEY-----\ndata\n-----END ENCRYPTED PRIVATE KEY-----\n",
+            "-----BEGIN RSA PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\ndata\n-----END RSA PRIVATE KEY-----\n",
+            encrypted_openssh_key,
+        )
+        for private_key in invalid_keys:
+            with self.subTest(private_key=private_key[:32]):
+                with self.assertRaises(ValidationError):
+                    LogMonitorPreflightRequest(
+                        **request_values(
+                            ssh_password=None,
+                            ssh_private_key=private_key,
+                        )
+                    )
+
+    def test_preflight_binding_excludes_both_ssh_secrets(self) -> None:
+        password_request = LogMonitorPreflightRequest(**request_values())
+        key_request = LogMonitorPreflightRequest(
+            **request_values(ssh_password=None, ssh_private_key=PRIVATE_KEY)
+        )
+
+        self.assertEqual(
+            self.installer._binding(password_request, "192.168.1.10"),
+            self.installer._binding(key_request, "192.168.1.10"),
+        )
+
     def test_explicit_agent_host_has_priority_over_browser_host(self) -> None:
         config = InstallerConfig(
             **{
@@ -303,6 +388,40 @@ class LogMonitorInstallerTests(unittest.TestCase):
         self.assertIn("docker top mcp-server -eo pid,args", process_check)
         self.assertTrue(any(script.startswith("rm -rf -- /tmp/i2stream-logmonitor") for script in self.ssh.scripts))
 
+    def test_key_only_installation_never_exposes_private_key(self) -> None:
+        request_data = request_values(
+            ssh_password=None,
+            ssh_private_key=PRIVATE_KEY,
+        )
+        preflight = self.installer.preflight(
+            LogMonitorPreflightRequest(**request_data),
+            "192.168.1.10",
+        )
+        install_request = LogMonitorInstallRequest(
+            **request_data,
+            preflight_id=preflight["preflight_id"],
+        )
+
+        with patch("logmonitor_installer.threading.Thread", ImmediateThread):
+            created = self.installer.create_installation(
+                install_request,
+                "192.168.1.10",
+            )
+
+        job = self.installer.get_job(created["job_id"])
+        self.assertEqual(job["status"], "completed")
+        self.assertEqual(set(self.ssh.auth_modes), {"key"})
+        self.assertNotIn(PRIVATE_KEY, repr(preflight))
+        self.assertNotIn(PRIVATE_KEY, repr(created))
+        self.assertNotIn(PRIVATE_KEY, repr(job))
+        self.assertNotIn(PRIVATE_KEY, "\n".join(self.ssh.scripts))
+        self.assertNotIn(
+            PRIVATE_KEY,
+            b"\n".join(content for _name, _remote, content in self.ssh.uploads).decode(
+                "utf-8", errors="ignore"
+            ),
+        )
+
     def test_preflight_is_bound_to_parameters_and_consumed_by_installation(self) -> None:
         preflight = self.installer.preflight(
             LogMonitorPreflightRequest(**request_values()),
@@ -371,6 +490,158 @@ class LogMonitorInstallerTests(unittest.TestCase):
         self.assertNotIn(PASSWORD, repr(argv))
         self.assertEqual(captured["env"]["SSHPASS"], PASSWORD)
 
+    def test_private_key_auth_uses_protected_temporary_file_without_sshpass(self) -> None:
+        client = SSHClient(Path(self.temp_dir.name) / "ssh3" / "known_hosts")
+        captured = {}
+
+        def fake_run(argv, **kwargs):
+            key_path = Path(argv[argv.index("-i") + 1])
+            captured["argv"] = argv
+            captured["env"] = kwargs["env"]
+            captured["key_content"] = key_path.read_text(encoding="utf-8")
+            captured["key_mode"] = key_path.stat().st_mode & 0o777
+            captured["directory_mode"] = key_path.parent.stat().st_mode & 0o777
+            captured["key_path"] = key_path
+            return subprocess.CompletedProcess(argv, 0, b"ok", b"")
+
+        with patch.dict(os.environ, {"SSHPASS": "inherited-secret"}):
+            with patch("logmonitor_installer.subprocess.run", fake_run):
+                result = client.run_script(
+                    "192.168.10.20",
+                    2222,
+                    "deploy",
+                    None,
+                    "id\n",
+                    private_key=PRIVATE_KEY,
+                )
+
+        self.assertEqual(result.stdout, b"ok")
+        self.assertEqual(captured["argv"][0], "ssh")
+        self.assertNotIn("sshpass", captured["argv"])
+        self.assertNotIn(PRIVATE_KEY, repr(captured["argv"]))
+        self.assertIn("IdentitiesOnly=yes", captured["argv"])
+        self.assertIn("BatchMode=yes", captured["argv"])
+        self.assertIn("PasswordAuthentication=no", captured["argv"])
+        self.assertNotIn("SSHPASS", captured["env"])
+        self.assertEqual(captured["key_content"], PRIVATE_KEY)
+        self.assertEqual(captured["key_mode"], 0o600)
+        self.assertEqual(captured["directory_mode"], 0o700)
+        self.assertFalse(captured["key_path"].exists())
+
+    def test_private_key_scp_uses_key_file_without_sshpass(self) -> None:
+        client = SSHClient(Path(self.temp_dir.name) / "ssh-scp-key" / "known_hosts")
+        captured = {}
+
+        def fake_run(argv, **kwargs):
+            key_path = Path(argv[argv.index("-i") + 1])
+            captured["argv"] = argv
+            captured["env"] = kwargs["env"]
+            captured["key_content"] = key_path.read_text(encoding="utf-8")
+            captured["key_path"] = key_path
+            return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+        with patch.dict(os.environ, {"SSHPASS": "inherited-secret"}):
+            with patch("logmonitor_installer.subprocess.run", fake_run):
+                client.upload(
+                    "192.168.10.20",
+                    2222,
+                    "deploy",
+                    None,
+                    self.script,
+                    "/tmp/i2stream-logmonitor.ABC12345/start_stream_mcp.sh",
+                    private_key=PRIVATE_KEY,
+                )
+
+        self.assertEqual(captured["argv"][0:3], ["scp", "-P", "2222"])
+        self.assertNotIn("sshpass", captured["argv"])
+        self.assertNotIn(PRIVATE_KEY, repr(captured["argv"]))
+        self.assertIn("IdentitiesOnly=yes", captured["argv"])
+        self.assertIn("BatchMode=yes", captured["argv"])
+        self.assertIn("PasswordAuthentication=no", captured["argv"])
+        self.assertNotIn("SSHPASS", captured["env"])
+        self.assertEqual(captured["key_content"], PRIVATE_KEY)
+        self.assertFalse(captured["key_path"].exists())
+
+    def test_both_credentials_use_one_ssh_process_with_key_then_password_auth(self) -> None:
+        client = SSHClient(Path(self.temp_dir.name) / "ssh4" / "known_hosts")
+        calls = []
+
+        def fake_run(argv, **kwargs):
+            key_path = Path(argv[argv.index("-i") + 1])
+            calls.append((argv, kwargs["env"], key_path.read_text(encoding="utf-8")))
+            return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+        with patch("logmonitor_installer.subprocess.run", fake_run):
+            result = client.run_script(
+                "192.168.10.20",
+                2222,
+                "deploy",
+                PASSWORD,
+                "id\n",
+                private_key=PRIVATE_KEY,
+            )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(len(calls), 1)
+        argv, environment, key_content = calls[0]
+        self.assertEqual(argv[0:3], ["sshpass", "-e", "ssh"])
+        self.assertIn("IdentitiesOnly=yes", argv)
+        self.assertIn("PreferredAuthentications=publickey,password", argv)
+        self.assertIn("PasswordAuthentication=yes", argv)
+        self.assertIn("NumberOfPasswordPrompts=1", argv)
+        self.assertNotIn("BatchMode=yes", argv)
+        self.assertEqual(environment["SSHPASS"], PASSWORD)
+        self.assertEqual(key_content, PRIVATE_KEY)
+
+    def test_both_credentials_do_not_repeat_remote_exit_255(self) -> None:
+        client = SSHClient(Path(self.temp_dir.name) / "ssh5" / "known_hosts")
+        calls = []
+
+        def fake_run(argv, **kwargs):
+            calls.append((argv, kwargs["env"]))
+            return subprocess.CompletedProcess(argv, 255, b"", b"command failed")
+
+        with patch("logmonitor_installer.subprocess.run", fake_run):
+            result = client.run_script(
+                "192.168.10.20",
+                2222,
+                "deploy",
+                PASSWORD,
+                "false\n",
+                private_key=PRIVATE_KEY,
+            )
+
+        self.assertEqual(result.returncode, 255)
+        self.assertEqual(len(calls), 1)
+
+    def test_both_credentials_use_one_scp_process_with_key_then_password_auth(self) -> None:
+        client = SSHClient(Path(self.temp_dir.name) / "ssh6" / "known_hosts")
+        calls = []
+
+        def fake_run(argv, **kwargs):
+            key_path = Path(argv[argv.index("-i") + 1])
+            calls.append((argv, kwargs["env"], key_path.read_text(encoding="utf-8")))
+            return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+        with patch("logmonitor_installer.subprocess.run", fake_run):
+            client.upload(
+                "192.168.10.20",
+                2222,
+                "deploy",
+                PASSWORD,
+                self.script,
+                "/tmp/i2stream-logmonitor.ABC12345/start_stream_mcp.sh",
+                private_key=PRIVATE_KEY,
+            )
+
+        self.assertEqual(len(calls), 1)
+        argv, environment, key_content = calls[0]
+        self.assertEqual(argv[0:3], ["sshpass", "-e", "scp"])
+        self.assertIn("PreferredAuthentications=publickey,password", argv)
+        self.assertNotIn("BatchMode=yes", argv)
+        self.assertEqual(environment["SSHPASS"], PASSWORD)
+        self.assertEqual(key_content, PRIVATE_KEY)
+
     def test_backend_install_auth_fails_closed_and_compares_bearer(self) -> None:
         token = "install-token-at-least-32-bytes-long"
         with patch.object(auth.settings, "i2stream_install_internal_token", SecretStr("")):
@@ -411,6 +682,33 @@ class LogMonitorInstallerTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 422)
         self.assertNotIn(password, response.body.decode("utf-8"))
+        self.assertEqual(
+            json.loads(response.body),
+            {"error": "LogMonitor 安装参数格式无效"},
+        )
+
+    def test_logmonitor_validation_response_does_not_echo_private_key(self) -> None:
+        request = SimpleNamespace(
+            url=SimpleNamespace(path="/api/logmonitor/preflight"),
+        )
+        validation_error = RequestValidationError(
+            [
+                {
+                    "type": "string_too_long",
+                    "loc": ("body", "ssh_private_key"),
+                    "msg": "String should have at most 16384 characters",
+                    "input": PRIVATE_KEY,
+                }
+            ],
+            body={"ssh_private_key": PRIVATE_KEY},
+        )
+
+        response = asyncio.run(
+            main.request_validation_error_handler(request, validation_error)
+        )
+
+        self.assertEqual(response.status_code, 422)
+        self.assertNotIn(PRIVATE_KEY, response.body.decode("utf-8"))
         self.assertEqual(
             json.loads(response.body),
             {"error": "LogMonitor 安装参数格式无效"},

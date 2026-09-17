@@ -84,6 +84,15 @@ def _json_body(handler: FakeHandler) -> dict:
 @pytest.mark.parametrize(
     ("method", "webui_path", "upstream_path"),
     [
+        ("GET", "/api/i2stream-console/knowledge/config", "/api/knowledge/config"),
+        ("PUT", "/api/i2stream-console/knowledge/config", "/api/knowledge/config"),
+        (
+            "POST",
+            "/api/i2stream-console/knowledge/config/check",
+            "/api/knowledge/config/check",
+        ),
+        ("GET", "/api/i2stream-console/knowledge/collections", "/api/knowledge/collections"),
+        ("POST", "/api/i2stream-console/knowledge/collections", "/api/knowledge/collections"),
         ("GET", "/api/i2stream-console/knowledge/files", "/api/knowledge/files"),
         ("POST", "/api/i2stream-console/knowledge/files", "/api/knowledge/files"),
         (
@@ -155,6 +164,8 @@ def test_allowlist_maps_only_console_data_routes(method, webui_path, upstream_pa
         ("GET", "/api/i2stream-console/reports/abc/content"),
         ("GET", "/api/i2stream-console/knowledge/files/a%2Fb"),
         ("GET", "/api/i2stream-console/logmonitor/preflight"),
+        ("POST", "/api/i2stream-console/knowledge/config"),
+        ("GET", "/api/i2stream-console/knowledge/config/check"),
         ("POST", "/api/i2stream-console/logmonitor/installations/not-a-job"),
         ("GET", "/api/i2stream-console/logmonitor/installations/not-a-job"),
     ],
@@ -188,6 +199,63 @@ def test_history_listing_requires_client_id_and_forwards_it_upstream():
     )
     assert detail.upstream_query == ""
     assert detail.extra_headers == {"X-I2H-Client-Id": "abcdefghijklmnop"}
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "upstream_path"),
+    [
+        (
+            "GET",
+            "/api/i2stream-console/knowledge/files?collection_name=team%20docs",
+            "/api/knowledge/files",
+        ),
+        (
+            "DELETE",
+            "/api/i2stream-console/knowledge/files/manual.pdf?collection_name=team%20docs",
+            "/api/knowledge/files/manual.pdf",
+        ),
+        (
+            "GET",
+            "/api/i2stream-console/knowledge/tasks/task-1?collection_name=team%20docs",
+            "/api/knowledge/tasks/task-1",
+        ),
+    ],
+)
+def test_knowledge_routes_forward_one_canonical_collection_query(method, path, upstream_path):
+    from api.i2stream_console import resolve_proxy_target
+
+    target = resolve_proxy_target(method, urlparse(path))
+
+    assert target.upstream_path == upstream_path
+    assert target.upstream_query == "collection_name=team+docs"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/i2stream-console/knowledge/files?collection_name=",
+        "/api/i2stream-console/knowledge/files?collection_name=docs&collection_name=other",
+        "/api/i2stream-console/knowledge/files?debug=1",
+        "/api/i2stream-console/knowledge/files?collection_name=%20docs",
+        "/api/i2stream-console/knowledge/files?collection_name=" + ("a" * 129),
+    ],
+)
+def test_knowledge_file_listing_requires_one_valid_collection(path):
+    from api.i2stream_console import ProxyRouteError, resolve_proxy_target
+
+    with pytest.raises(ProxyRouteError):
+        resolve_proxy_target("GET", urlparse(path))
+
+
+def test_knowledge_collection_routes_are_privileged():
+    from api.i2stream_console import resolve_proxy_target
+
+    for method in ("GET", "POST"):
+        target = resolve_proxy_target(
+            method,
+            urlparse("/api/i2stream-console/knowledge/collections"),
+        )
+        assert target.privileged_route is True
 
 
 @pytest.mark.parametrize(
@@ -262,16 +330,17 @@ def test_install_facade_requires_webui_auth_internal_token_and_ipv4_host(monkeyp
     monkeypatch.setattr(i2stream_console, "I2STREAM_CONSOLE_BEARER_TOKEN", "x" * 32)
     monkeypatch.setattr(i2stream_console, "I2STREAM_AGENT_PUBLIC_HOST", "")
     with pytest.raises(i2stream_console.ProxyRouteError) as unauthenticated:
-        i2stream_console._install_callback_host(handler, target)
+        i2stream_console._require_privileged_access(target)
     assert unauthenticated.value.status == 503
 
     monkeypatch.setattr(auth, "is_auth_enabled", lambda: True)
     monkeypatch.setattr(i2stream_console, "I2STREAM_CONSOLE_BEARER_TOKEN", None)
     with pytest.raises(i2stream_console.ProxyRouteError) as unconfigured:
-        i2stream_console._install_callback_host(handler, target)
+        i2stream_console._require_privileged_access(target)
     assert unconfigured.value.status == 503
 
     monkeypatch.setattr(i2stream_console, "I2STREAM_CONSOLE_BEARER_TOKEN", "x" * 32)
+    i2stream_console._require_privileged_access(target)
     assert i2stream_console._install_callback_host(handler, target) == "192.168.34.65"
     for invalid_host in ("localhost:8787", "127.0.0.1:8787", "[::1]:8787", "bad host"):
         with pytest.raises(i2stream_console.ProxyRouteError):
@@ -283,6 +352,36 @@ def test_install_facade_requires_webui_auth_internal_token_and_ipv4_host(monkeyp
     monkeypatch.setattr(i2stream_console, "I2STREAM_AGENT_PUBLIC_HOST", "10.20.30.40")
     assert i2stream_console._install_callback_host(
         FakeHandler(headers={"Host": "webui.example"}),
+        target,
+    ) is None
+
+
+def test_knowledge_config_facade_requires_auth_and_internal_token_without_host_validation(monkeypatch):
+    from api import auth, i2stream_console
+
+    target = i2stream_console.resolve_proxy_target(
+        "PUT",
+        urlparse("/api/i2stream-console/knowledge/config"),
+    )
+    assert target.privileged_route is True
+    assert target.install_route is False
+
+    monkeypatch.setattr(auth, "is_auth_enabled", lambda: False)
+    monkeypatch.setattr(i2stream_console, "I2STREAM_CONSOLE_BEARER_TOKEN", "x" * 32)
+    with pytest.raises(i2stream_console.ProxyRouteError) as unauthenticated:
+        i2stream_console._require_privileged_access(target)
+    assert unauthenticated.value.status == 503
+
+    monkeypatch.setattr(auth, "is_auth_enabled", lambda: True)
+    monkeypatch.setattr(i2stream_console, "I2STREAM_CONSOLE_BEARER_TOKEN", None)
+    with pytest.raises(i2stream_console.ProxyRouteError) as unconfigured:
+        i2stream_console._require_privileged_access(target)
+    assert unconfigured.value.status == 503
+
+    monkeypatch.setattr(i2stream_console, "I2STREAM_CONSOLE_BEARER_TOKEN", "x" * 32)
+    i2stream_console._require_privileged_access(target)
+    assert i2stream_console._install_callback_host(
+        FakeHandler(headers={"Host": "localhost:8787"}),
         target,
     ) is None
 
@@ -408,6 +507,111 @@ def test_knowledge_upload_uses_the_configurable_upload_limit(monkeypatch):
         read_request_body=True,
     ) is True
     request, _timeout = opener.requests[0]
+    assert request.data == body
+
+
+def test_logmonitor_install_request_allows_64kib_but_rejects_larger_body(monkeypatch):
+    from api import auth, i2stream_console
+
+    response = FakeResponse(b'{"preflight_id":"abc"}')
+    opener = FakeOpener(response)
+    monkeypatch.setattr(auth, "is_auth_enabled", lambda: True)
+    monkeypatch.setattr(i2stream_console, "_upstream_opener", lambda _origin: opener)
+    monkeypatch.setattr(i2stream_console, "I2STREAM_CONSOLE_BASE_URL", "http://127.0.0.1:50091")
+    monkeypatch.setattr(i2stream_console, "I2STREAM_CONSOLE_BEARER_TOKEN", "internal-install-token")
+    monkeypatch.setattr(i2stream_console, "I2STREAM_AGENT_PUBLIC_HOST", "192.168.34.65")
+
+    accepted_body = b"x" * (64 * 1024)
+    accepted = FakeHandler(
+        accepted_body,
+        headers={"Content-Length": str(len(accepted_body)), "Content-Type": "application/json"},
+    )
+    assert i2stream_console.handle_proxy(
+        accepted,
+        urlparse("/api/i2stream-console/logmonitor/preflight"),
+        "POST",
+        read_request_body=True,
+    ) is True
+    assert opener.requests[0][0].data == accepted_body
+
+    rejected_body = b"x" * (64 * 1024 + 1)
+    rejected = FakeHandler(
+        rejected_body,
+        headers={"Content-Length": str(len(rejected_body)), "Content-Type": "application/json"},
+    )
+    assert i2stream_console.handle_proxy(
+        rejected,
+        urlparse("/api/i2stream-console/logmonitor/preflight"),
+        "POST",
+        read_request_body=True,
+    ) is True
+    assert rejected.status == 413
+    assert _json_body(rejected)["error"].startswith("Request body too large")
+    assert len(opener.requests) == 1
+
+
+def test_knowledge_config_put_reads_body_and_applies_small_limit(monkeypatch):
+    from api import auth, i2stream_console
+
+    response = FakeResponse(b'{"code":0,"status":"success"}')
+    opener = FakeOpener(response)
+    monkeypatch.setattr(auth, "is_auth_enabled", lambda: True)
+    monkeypatch.setattr(i2stream_console, "_upstream_opener", lambda _origin: opener)
+    monkeypatch.setattr(i2stream_console, "I2STREAM_CONSOLE_BASE_URL", "http://127.0.0.1:50091")
+    monkeypatch.setattr(i2stream_console, "I2STREAM_CONSOLE_BEARER_TOKEN", "internal-config-token")
+
+    body = b'{"vector_search_host":"http://rag:8900","rag_service_mcp_url":"http://rag:8900/mcp"}'
+    accepted = FakeHandler(
+        body,
+        headers={"Content-Length": str(len(body)), "Content-Type": "application/json"},
+    )
+    assert i2stream_console.handle_proxy(
+        accepted,
+        urlparse("/api/i2stream-console/knowledge/config"),
+        "PUT",
+    ) is True
+    request, _timeout = opener.requests[0]
+    assert request.data == body
+    assert request.full_url == "http://127.0.0.1:50091/api/knowledge/config"
+
+    rejected_body = b"x" * (8 * 1024 + 1)
+    rejected = FakeHandler(
+        rejected_body,
+        headers={"Content-Length": str(len(rejected_body)), "Content-Type": "application/json"},
+    )
+    assert i2stream_console.handle_proxy(
+        rejected,
+        urlparse("/api/i2stream-console/knowledge/config/check"),
+        "POST",
+    ) is True
+    assert rejected.status == 413
+    assert rejected.close_connection is True
+    assert len(opener.requests) == 1
+
+
+def test_knowledge_collection_create_forwards_small_json_body(monkeypatch):
+    from api import auth, i2stream_console
+
+    response = FakeResponse(b'{"code":0,"status":"success"}')
+    opener = FakeOpener(response)
+    monkeypatch.setattr(auth, "is_auth_enabled", lambda: True)
+    monkeypatch.setattr(i2stream_console, "_upstream_opener", lambda _origin: opener)
+    monkeypatch.setattr(i2stream_console, "I2STREAM_CONSOLE_BASE_URL", "http://127.0.0.1:50091")
+    monkeypatch.setattr(i2stream_console, "I2STREAM_CONSOLE_BEARER_TOKEN", "internal-config-token")
+    body = b'{"collection_name":"team-docs"}'
+    handler = FakeHandler(
+        body,
+        headers={"Content-Length": str(len(body)), "Content-Type": "application/json"},
+    )
+
+    assert i2stream_console.handle_proxy(
+        handler,
+        urlparse("/api/i2stream-console/knowledge/collections"),
+        "POST",
+    ) is True
+
+    request, _timeout = opener.requests[0]
+    assert request.full_url == "http://127.0.0.1:50091/api/knowledge/collections"
     assert request.data == body
 
 

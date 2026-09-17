@@ -147,6 +147,16 @@ CHAT_SCHEMA_STATEMENTS = (
         CHECK (LENGTH(TRIM(session_id)) > 0)
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS knowledge_service_config (
+        id INTEGER NOT NULL PRIMARY KEY CHECK (id = 1),
+        vector_search_host TEXT NOT NULL,
+        rag_service_mcp_url TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        CHECK (LENGTH(TRIM(vector_search_host)) > 0),
+        CHECK (LENGTH(TRIM(rag_service_mcp_url)) > 0)
+    )
+    """,
     NODE_HEARTBEAT_SCHEMA_STATEMENT,
 )
 

@@ -99,10 +99,18 @@ from gateway_bridge import (
     valid_gateway_clarify_id,
 )
 from knowledge_store import (
+    check_knowledge_service_connections,
+    create_vector_collection,
     delete_vector_file,
     get_vector_task_status,
+    list_vector_collections,
     list_vector_files,
     upload_knowledge_file,
+)
+from knowledge_config_store import (
+    empty_knowledge_configuration,
+    get_knowledge_configuration,
+    save_knowledge_configuration,
 )
 from logmonitor_installer import (
     CALLBACK_HOST_HEADER,
@@ -118,6 +126,8 @@ from models import (
     DashboardSessionCreateRequest,
     DashboardSessionUpdateRequest,
     HeartbeatRequest,
+    KnowledgeCollectionCreateRequest,
+    KnowledgeServiceConfigurationRequest,
     LogMonitorInstallRequest,
     LogMonitorPreflightRequest,
     MessageFeedbackRequest,
@@ -276,7 +286,7 @@ async def dashboard_anonymous_identity_middleware(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.allowed_origins,
-    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -808,17 +818,93 @@ async def api_stop_dashboard_agent_run(run_id: str, owner_id: DashboardUserId) -
 @app.post("/api/knowledge/files")
 async def api_upload_knowledge_file(
     file: Annotated[UploadFile, File()],
+    collection_name: Annotated[str | None, Form(max_length=128)] = None,
 ) -> dict[str, Any]:
     return {
         "code": 0,
         "status": "success",
-        "file": await upload_knowledge_file(file),
+        "file": await upload_knowledge_file(file, collection_name),
+    }
+
+
+@app.get("/api/knowledge/config")
+async def api_get_knowledge_configuration(
+    _: None = Depends(require_install_auth),
+) -> dict[str, Any]:
+    configuration = get_knowledge_configuration()
+    return {
+        "code": 0,
+        "status": "success",
+        "configuration": configuration or empty_knowledge_configuration(),
+    }
+
+
+@app.put("/api/knowledge/config")
+async def api_put_knowledge_configuration(
+    payload: KnowledgeServiceConfigurationRequest,
+    _: None = Depends(require_install_auth),
+) -> dict[str, Any]:
+    configuration = save_knowledge_configuration(
+        payload.vector_search_host,
+        payload.rag_service_mcp_url,
+    )
+    return {
+        "code": 0,
+        "status": "success",
+        "configuration": configuration,
+        "mcp_reload_required": True,
+    }
+
+
+@app.post("/api/knowledge/config/check")
+async def api_check_knowledge_configuration(
+    payload: KnowledgeServiceConfigurationRequest,
+    _: None = Depends(require_install_auth),
+) -> dict[str, Any]:
+    checks = await check_knowledge_service_connections(payload)
+    return {
+        "code": 0,
+        "status": "success",
+        "configuration": {
+            "configured": True,
+            "vector_search_host": payload.vector_search_host,
+            "rag_service_mcp_url": payload.rag_service_mcp_url,
+            "updated_at": None,
+        },
+        "checks": checks,
+    }
+
+
+@app.get("/api/knowledge/collections")
+async def api_list_knowledge_collections(
+    _: None = Depends(require_install_auth),
+) -> dict[str, Any]:
+    collections = await list_vector_collections()
+    return {
+        "code": 0,
+        "status": "success",
+        "collections": collections,
+        "total": len(collections),
+    }
+
+
+@app.post("/api/knowledge/collections")
+async def api_create_knowledge_collection(
+    payload: KnowledgeCollectionCreateRequest,
+    _: None = Depends(require_install_auth),
+) -> dict[str, Any]:
+    return {
+        "code": 0,
+        "status": "success",
+        "collection": await create_vector_collection(payload.collection_name),
     }
 
 
 @app.get("/api/knowledge/files")
-async def api_list_knowledge_files() -> dict[str, Any]:
-    files = await list_vector_files()
+async def api_list_knowledge_files(
+    collection_name: Annotated[str | None, Query(max_length=128)] = None,
+) -> dict[str, Any]:
+    files = await list_vector_files(collection_name)
     return {
         "code": 0,
         "status": "success",
@@ -828,20 +914,26 @@ async def api_list_knowledge_files() -> dict[str, Any]:
 
 
 @app.delete("/api/knowledge/files/{file_id}")
-async def api_delete_knowledge_file(file_id: str) -> dict[str, Any]:
+async def api_delete_knowledge_file(
+    file_id: str,
+    collection_name: Annotated[str | None, Query(max_length=128)] = None,
+) -> dict[str, Any]:
     return {
         "code": 0,
         "status": "success",
-        "file": await delete_vector_file(file_id),
+        "file": await delete_vector_file(file_id, collection_name),
     }
 
 
 @app.get("/api/knowledge/tasks/{task_id}")
-async def api_get_knowledge_task(task_id: str) -> dict[str, Any]:
+async def api_get_knowledge_task(
+    task_id: str,
+    collection_name: Annotated[str | None, Query(max_length=128)] = None,
+) -> dict[str, Any]:
     return {
         "code": 0,
         "status": "success",
-        "task": await get_vector_task_status(task_id),
+        "task": await get_vector_task_status(task_id, collection_name),
     }
 
 

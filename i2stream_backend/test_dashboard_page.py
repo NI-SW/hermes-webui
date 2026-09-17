@@ -8,7 +8,6 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 
-os.environ.setdefault("VECTOR_SEARCH_HOST", "http://127.0.0.1:8900")
 os.environ.setdefault("SESSION_HMAC_SECRET", "session-secret-32-bytes-for-tests!!")
 os.environ.setdefault("GATEWAY_BRIDGE_TOKEN", "gateway-token-32-bytes-for-tests!!!")
 
@@ -274,14 +273,16 @@ class DashboardPageTests(unittest.IsolatedAsyncioTestCase):
                 "file_size": 120,
                 "upload_time": "2026-07-07T10:00:00",
                 "total_chunks": 3,
+                "collection_name": "project-a",
             }
         ]
 
-        async def fake_list_vector_files():
+        async def fake_list_vector_files(collection_name):
+            self.assertEqual(collection_name, "project-a")
             return expected_files
 
         with patch.object(main, "list_vector_files", fake_list_vector_files):
-            payload = await main.api_list_knowledge_files()
+            payload = await main.api_list_knowledge_files("project-a")
 
         self.assertEqual(
             payload,
@@ -294,14 +295,23 @@ class DashboardPageTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_knowledge_files_delete_api_wraps_vector_file_delete(self) -> None:
-        expected_file = {"file_id": "1783409846_manual.docx", "operation_id": 42}
+        expected_file = {
+            "file_id": "1783409846_manual.docx",
+            "collection_name": "project-a",
+            "deleted_chunks": 3,
+            "message": "deleted",
+        }
 
-        async def fake_delete_vector_file(file_id):
+        async def fake_delete_vector_file(file_id, collection_name):
             self.assertEqual(file_id, "1783409846_manual.docx")
+            self.assertEqual(collection_name, "project-a")
             return expected_file
 
         with patch.object(main, "delete_vector_file", fake_delete_vector_file):
-            payload = await main.api_delete_knowledge_file("1783409846_manual.docx")
+            payload = await main.api_delete_knowledge_file(
+                "1783409846_manual.docx",
+                "project-a",
+            )
 
         self.assertEqual(
             payload,
@@ -309,6 +319,91 @@ class DashboardPageTests(unittest.IsolatedAsyncioTestCase):
                 "code": 0,
                 "status": "success",
                 "file": expected_file,
+            },
+        )
+
+    async def test_knowledge_upload_and_task_api_forward_collection(self) -> None:
+        upload = main.UploadFile(filename="manual.docx", file=io.BytesIO(b"manual"))
+        expected_upload = {
+            "filename": "manual.docx",
+            "file_id": "1783500000_manual.docx",
+            "task_id": "task-1",
+        }
+        expected_task = {
+            "task_id": "task-1",
+            "status": "completed",
+            "terminal": True,
+        }
+
+        async def fake_upload_knowledge_file(file, collection_name):
+            self.assertIs(file, upload)
+            self.assertEqual(collection_name, "project-a")
+            return expected_upload
+
+        async def fake_get_vector_task_status(task_id, collection_name):
+            self.assertEqual(task_id, "task-1")
+            self.assertEqual(collection_name, "project-a")
+            return expected_task
+
+        with (
+            patch.object(main, "upload_knowledge_file", fake_upload_knowledge_file),
+            patch.object(main, "get_vector_task_status", fake_get_vector_task_status),
+        ):
+            uploaded = await main.api_upload_knowledge_file(upload, "project-a")
+            task = await main.api_get_knowledge_task("task-1", "project-a")
+
+        self.assertEqual(
+            uploaded,
+            {"code": 0, "status": "success", "file": expected_upload},
+        )
+        self.assertEqual(
+            task,
+            {"code": 0, "status": "success", "task": expected_task},
+        )
+
+    async def test_knowledge_collections_api_lists_and_creates_collections(self) -> None:
+        expected_collections = [
+            {
+                "name": "documents",
+                "points_count": 3,
+                "vectors_count": 3,
+                "status": "green",
+                "schema": "hybrid",
+                "is_default": True,
+            }
+        ]
+
+        async def fake_list_vector_collections():
+            return expected_collections
+
+        async def fake_create_vector_collection(collection_name):
+            self.assertEqual(collection_name, "project-a")
+            return {"collection_name": "project-a", "message": "created"}
+
+        with (
+            patch.object(main, "list_vector_collections", fake_list_vector_collections),
+            patch.object(main, "create_vector_collection", fake_create_vector_collection),
+        ):
+            listed = await main.api_list_knowledge_collections()
+            created = await main.api_create_knowledge_collection(
+                main.KnowledgeCollectionCreateRequest(collection_name=" project-a ")
+            )
+
+        self.assertEqual(
+            listed,
+            {
+                "code": 0,
+                "status": "success",
+                "collections": expected_collections,
+                "total": 1,
+            },
+        )
+        self.assertEqual(
+            created,
+            {
+                "code": 0,
+                "status": "success",
+                "collection": {"collection_name": "project-a", "message": "created"},
             },
         )
 

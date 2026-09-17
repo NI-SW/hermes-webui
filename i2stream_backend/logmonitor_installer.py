@@ -87,8 +87,6 @@ class SSHClient:
         return [
             "-o", "StrictHostKeyChecking=accept-new",
             "-o", f"UserKnownHostsFile={self.known_hosts_path}",
-            "-o", "PasswordAuthentication=yes",
-            "-o", "NumberOfPasswordPrompts=1",
             "-o", "LogLevel=ERROR",
             "-o", "ConnectTimeout=10",
         ]
@@ -99,17 +97,63 @@ class SSHClient:
         environment["SSHPASS"] = password
         return environment
 
-    def run_script(
+    @staticmethod
+    def _key_environment() -> dict[str, str]:
+        environment = os.environ.copy()
+        environment.pop("SSHPASS", None)
+        return environment
+
+    @staticmethod
+    def _write_private_key(directory: Path, private_key: str) -> Path:
+        directory.chmod(0o700)
+        key_path = directory / "identity"
+        key_path.write_text(private_key, encoding="utf-8")
+        key_path.chmod(0o600)
+        return key_path
+
+    def _run_script_with_key(
+        self,
+        target_ip: str,
+        port: int,
+        username: str,
+        private_key: str,
+        script: str,
+        timeout_seconds: int,
+    ) -> subprocess.CompletedProcess[bytes]:
+        with tempfile.TemporaryDirectory(prefix="i2stream-ssh-key-") as temporary_dir:
+            key_path = self._write_private_key(Path(temporary_dir), private_key)
+            argv = [
+                "ssh",
+                "-p",
+                str(port),
+                *self._common_options(),
+                "-i",
+                str(key_path),
+                "-o", "IdentitiesOnly=yes",
+                "-o", "BatchMode=yes",
+                "-o", "PasswordAuthentication=no",
+                f"{username}@{target_ip}",
+                "bash -s",
+            ]
+            return subprocess.run(
+                argv,
+                input=script.encode("utf-8"),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=self._key_environment(),
+                timeout=timeout_seconds,
+                check=False,
+            )
+
+    def _run_script_with_password(
         self,
         target_ip: str,
         port: int,
         username: str,
         password: str,
         script: str,
-        *,
-        timeout_seconds: int | None = None,
+        timeout_seconds: int,
     ) -> subprocess.CompletedProcess[bytes]:
-        self._prepare_known_hosts()
         argv = [
             "sshpass",
             "-e",
@@ -117,6 +161,8 @@ class SSHClient:
             "-p",
             str(port),
             *self._common_options(),
+            "-o", "PasswordAuthentication=yes",
+            "-o", "NumberOfPasswordPrompts=1",
             f"{username}@{target_ip}",
             "bash -s",
         ]
@@ -126,11 +172,125 @@ class SSHClient:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             env=self._environment(password),
-            timeout=timeout_seconds or self.timeout_seconds,
+            timeout=timeout_seconds,
             check=False,
         )
 
-    def upload(
+    def _run_script_with_key_and_password(
+        self,
+        target_ip: str,
+        port: int,
+        username: str,
+        password: str,
+        private_key: str,
+        script: str,
+        timeout_seconds: int,
+    ) -> subprocess.CompletedProcess[bytes]:
+        with tempfile.TemporaryDirectory(prefix="i2stream-ssh-key-") as temporary_dir:
+            key_path = self._write_private_key(Path(temporary_dir), private_key)
+            argv = [
+                "sshpass",
+                "-e",
+                "ssh",
+                "-p",
+                str(port),
+                *self._common_options(),
+                "-i",
+                str(key_path),
+                "-o", "IdentitiesOnly=yes",
+                "-o", "PreferredAuthentications=publickey,password",
+                "-o", "PasswordAuthentication=yes",
+                "-o", "NumberOfPasswordPrompts=1",
+                f"{username}@{target_ip}",
+                "bash -s",
+            ]
+            return subprocess.run(
+                argv,
+                input=script.encode("utf-8"),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=self._environment(password),
+                timeout=timeout_seconds,
+                check=False,
+            )
+
+    def run_script(
+        self,
+        target_ip: str,
+        port: int,
+        username: str,
+        password: str | None,
+        script: str,
+        *,
+        private_key: str | None = None,
+        timeout_seconds: int | None = None,
+    ) -> subprocess.CompletedProcess[bytes]:
+        self._prepare_known_hosts()
+        timeout = timeout_seconds or self.timeout_seconds
+        if private_key is not None and password is not None:
+            return self._run_script_with_key_and_password(
+                target_ip,
+                port,
+                username,
+                password,
+                private_key,
+                script,
+                timeout,
+            )
+        if private_key is not None:
+            return self._run_script_with_key(
+                target_ip,
+                port,
+                username,
+                private_key,
+                script,
+                timeout,
+            )
+        if password is None:
+            raise ValueError("SSH password or private key is required")
+        return self._run_script_with_password(
+            target_ip,
+            port,
+            username,
+            password,
+            script,
+            timeout,
+        )
+
+    def _upload_with_key(
+        self,
+        target_ip: str,
+        port: int,
+        username: str,
+        private_key: str,
+        local_path: Path,
+        remote_path: str,
+    ) -> subprocess.CompletedProcess[bytes]:
+        with tempfile.TemporaryDirectory(prefix="i2stream-ssh-key-") as temporary_dir:
+            key_path = self._write_private_key(Path(temporary_dir), private_key)
+            argv = [
+                "scp",
+                "-P",
+                str(port),
+                *self._common_options(),
+                "-i",
+                str(key_path),
+                "-o", "IdentitiesOnly=yes",
+                "-o", "BatchMode=yes",
+                "-o", "PasswordAuthentication=no",
+                str(local_path),
+                f"{username}@{target_ip}:{remote_path}",
+            ]
+            return subprocess.run(
+                argv,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=self._key_environment(),
+                timeout=max(self.timeout_seconds, 600),
+                check=False,
+            )
+
+    def _upload_with_password(
         self,
         target_ip: str,
         port: int,
@@ -138,13 +298,14 @@ class SSHClient:
         password: str,
         local_path: Path,
         remote_path: str,
-    ) -> None:
-        self._prepare_known_hosts()
+    ) -> subprocess.CompletedProcess[bytes]:
         argv = [
             "sshpass", "-e", "scp", "-P", str(port), *self._common_options(),
+            "-o", "PasswordAuthentication=yes",
+            "-o", "NumberOfPasswordPrompts=1",
             str(local_path), f"{username}@{target_ip}:{remote_path}",
         ]
-        result = subprocess.run(
+        return subprocess.run(
             argv,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -152,6 +313,80 @@ class SSHClient:
             timeout=max(self.timeout_seconds, 600),
             check=False,
         )
+
+    def _upload_with_key_and_password(
+        self,
+        target_ip: str,
+        port: int,
+        username: str,
+        password: str,
+        private_key: str,
+        local_path: Path,
+        remote_path: str,
+    ) -> subprocess.CompletedProcess[bytes]:
+        with tempfile.TemporaryDirectory(prefix="i2stream-ssh-key-") as temporary_dir:
+            key_path = self._write_private_key(Path(temporary_dir), private_key)
+            argv = [
+                "sshpass", "-e", "scp", "-P", str(port),
+                *self._common_options(),
+                "-i", str(key_path),
+                "-o", "IdentitiesOnly=yes",
+                "-o", "PreferredAuthentications=publickey,password",
+                "-o", "PasswordAuthentication=yes",
+                "-o", "NumberOfPasswordPrompts=1",
+                str(local_path), f"{username}@{target_ip}:{remote_path}",
+            ]
+            return subprocess.run(
+                argv,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=self._environment(password),
+                timeout=max(self.timeout_seconds, 600),
+                check=False,
+            )
+
+    def upload(
+        self,
+        target_ip: str,
+        port: int,
+        username: str,
+        password: str | None,
+        local_path: Path,
+        remote_path: str,
+        *,
+        private_key: str | None = None,
+    ) -> None:
+        self._prepare_known_hosts()
+        if private_key is not None and password is not None:
+            result = self._upload_with_key_and_password(
+                target_ip,
+                port,
+                username,
+                password,
+                private_key,
+                local_path,
+                remote_path,
+            )
+        elif private_key is not None:
+            result = self._upload_with_key(
+                target_ip,
+                port,
+                username,
+                private_key,
+                local_path,
+                remote_path,
+            )
+        elif password is not None:
+            result = self._upload_with_password(
+                target_ip,
+                port,
+                username,
+                password,
+                local_path,
+                remote_path,
+            )
+        else:
+            raise ValueError("SSH password or private key is required")
         if result.returncode != 0:
             raise InstallerError("文件传输失败", 502)
 
@@ -203,7 +438,7 @@ class LogMonitorInstaller:
     @staticmethod
     def _binding(payload: LogMonitorPreflightRequest, callback_host: str) -> str:
         values = payload.model_dump(
-            exclude={"ssh_password", "preflight_id"},
+            exclude={"ssh_password", "ssh_private_key", "preflight_id"},
             mode="json",
         )
         values["callback_host"] = callback_host
@@ -243,7 +478,16 @@ class LogMonitorInstaller:
         payload: LogMonitorPreflightRequest,
         callback_host: str,
     ) -> list[dict[str, str]]:
-        password = payload.ssh_password.get_secret_value()
+        password = (
+            payload.ssh_password.get_secret_value()
+            if payload.ssh_password is not None
+            else None
+        )
+        private_key = (
+            payload.ssh_private_key.get_secret_value()
+            if payload.ssh_private_key is not None
+            else None
+        )
         try:
             result = self.ssh.run_script(
                 payload.target_ip,
@@ -251,6 +495,7 @@ class LogMonitorInstaller:
                 payload.ssh_username,
                 password,
                 self._preflight_script(payload, callback_host),
+                private_key=private_key,
                 timeout_seconds=_PREFLIGHT_TIMEOUT_SECONDS,
             )
         except (OSError, subprocess.TimeoutExpired):
@@ -468,12 +713,23 @@ class LogMonitorInstaller:
         return "".join(f"{name}={value}\n" for name, value in values.items())
 
     def _run_required(self, payload: LogMonitorInstallRequest, script: str, *, timeout: int = 60) -> bytes:
+        password = (
+            payload.ssh_password.get_secret_value()
+            if payload.ssh_password is not None
+            else None
+        )
+        private_key = (
+            payload.ssh_private_key.get_secret_value()
+            if payload.ssh_private_key is not None
+            else None
+        )
         result = self.ssh.run_script(
             payload.target_ip,
             payload.ssh_port,
             payload.ssh_username,
-            payload.ssh_password.get_secret_value(),
+            password,
             script,
+            private_key=private_key,
             timeout_seconds=timeout,
         )
         if result.returncode != 0:
@@ -531,8 +787,26 @@ class LogMonitorInstaller:
                     (self.config.start_script_path, f"{remote_dir}/start_stream_mcp.sh"),
                     (env_path, f"{remote_dir}/node.env"),
                 )
+                password = (
+                    payload.ssh_password.get_secret_value()
+                    if payload.ssh_password is not None
+                    else None
+                )
+                private_key = (
+                    payload.ssh_private_key.get_secret_value()
+                    if payload.ssh_private_key is not None
+                    else None
+                )
                 for local_path, remote_path in transfers:
-                    self.ssh.upload(payload.target_ip, payload.ssh_port, payload.ssh_username, payload.ssh_password.get_secret_value(), local_path, remote_path)
+                    self.ssh.upload(
+                        payload.target_ip,
+                        payload.ssh_port,
+                        payload.ssh_username,
+                        password,
+                        local_path,
+                        remote_path,
+                        private_key=private_key,
+                    )
 
             self._run_required(payload, f"chmod 0600 {shlex.quote(remote_dir)}/node.env\nchmod 0700 {shlex.quote(remote_dir)}/start_stream_mcp.sh\n")
             self._update_job(job_id, "verifying_artifact", "正在校验镜像文件")

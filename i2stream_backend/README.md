@@ -28,7 +28,6 @@ Important variables:
 - `PUBLIC_BASE_URL`: public base URL used in returned file links.
 - `FILE_STORE_DIR`: generated-file storage directory. Defaults to `/app/data/agent-console/files`.
 - `INBOX_FILE_STORE_DIR`: directory for files uploaded by external clients and shown in the Tampermonkey Files tab. Defaults to `/app/data/agent-console/inbox-files`.
-- `VECTOR_SEARCH_HOST`: RAG/vector service root URL. It must be a full `http://host:port` or `https://host:port` value, for example `http://192.168.34.65:8900`.
 - `PROXY_API_KEY`: optional backend API key. If set, callers must send `Authorization: Bearer <key>`.
 - `SESSION_HMAC_SECRET`: required server-only secret of at least 32 UTF-8 bytes. It derives an opaque Gateway session ID from browser `client_id` and `conversation`.
 - `GATEWAY_BRIDGE_TOKEN`: required bridge credential of at least 32 UTF-8 bytes. The Gateway plugin sends it as a Bearer token when connecting to `/internal/gateway`.
@@ -40,6 +39,12 @@ Important variables:
 - `LOGMONITOR_START_SCRIPT_PATH`: fixed startup script embedded in the i2agent image at `/app/logmonitor-installer/start_stream_mcp.sh`.
 - `LOGMONITOR_KNOWN_HOSTS_PATH`: persistent OpenSSH host-key store used with `StrictHostKeyChecking=accept-new`.
 - Chat history SQLite file is stored at `/app/data/agent-console/chat.db`. `/app/data` is mounted to the host in container deployments.
+
+The vector REST and RAG MCP addresses are runtime settings managed from the
+Hermes WebUI knowledge page. They are stored as the single
+`knowledge_service_config` row in the same SQLite database and take effect for
+knowledge operations without restarting this backend. Until both addresses are
+saved, knowledge upload, task, list, and delete operations return HTTP 503.
 
 The DataCop endpoint, target `agent` project, credentials, 30-second request timeout, 32-job queue, and 900-second job TTL are built into `config.py`. DataCop environment variables are intentionally not read.
 
@@ -62,6 +67,30 @@ http://192.168.34.65:50091
 ### `GET /health`
 
 Returns backend status and configured Hermes base URL.
+
+### `GET /api/knowledge/config`
+
+Returns the runtime knowledge service configuration. When it has not been
+saved, `configured` is `false`, both URLs are empty strings, and `updated_at`
+is `null`. This route requires the internal installation Bearer token.
+
+### `PUT /api/knowledge/config`
+
+Validates and stores both runtime service URLs. The vector URL must be an
+`http(s)://host:port` origin with no path. The MCP URL must use the same URL
+shape with the exact `/mcp` path. User information, query strings, and
+fragments are rejected. A successful response includes
+`mcp_reload_required: true`; persistence is complete, while the authenticated
+8787 facade remains responsible for synchronizing the MCP URL into the active
+Hermes configuration. This route requires the internal installation Bearer
+token.
+
+### `POST /api/knowledge/config/check`
+
+Validates the submitted URLs without saving them, checks the vector service at
+`/health`, and probes the MCP URL. The response contains fixed
+`vector_search` and `rag_service_mcp` check records. This route requires the
+internal installation Bearer token.
 
 ### `GET /dashboard`
 
@@ -91,15 +120,17 @@ from the same IP creates the record again.
 
 Requires `Authorization: Bearer <I2STREAM_INSTALL_INTERNAL_TOKEN>` and the internal
 `X-I2Stream-Agent-Host` header unless `AGENT_PUBLIC_HOST` is configured. It accepts
-the target IPv4, SSH port/username/password, and the five `node.env` fields
+the target IPv4, SSH port/username, optional SSH password and optional SSH private
+key, plus the five `node.env` fields
 `STREAM_LOG_MONITOR`, `MCP_IADEBUG_USER`, `ACTIVE_HOME`, `STREAM_HOME`, and
-`STREAM_DATA_HOME`.
+`STREAM_DATA_HOME`. At least one SSH credential is required. Private keys are
+limited to 16 KiB; this version accepts unencrypted private keys only.
 
 The synchronous preflight checks SSH login, amd64 architecture, Docker access,
 required directories and tools, transfer disk space, the absence of an existing
 `mcp-server`, and target-to-Agent connectivity. A successful response contains a
-short-lived `preflight_id`, the two derived Agent URLs, and all check results. The
-password is not retained in the preflight record.
+short-lived `preflight_id`, the two derived Agent URLs, and all check results. SSH
+credentials are not retained in the preflight record.
 
 ### `POST /api/logmonitor/installations`
 
@@ -110,8 +141,19 @@ the image SHA256 on the target, starts the container, and checks both container 
 LogMonitor process state. Only one active job is allowed per target IPv4. An existing
 `mcp-server` is not replaced.
 
-SSH passwords are passed to `sshpass` through `SSHPASS`; they are not placed in
-arguments, responses, job state, log messages, or generated `node.env` files.
+When both credentials are provided, one SSH/SCP process offers the private key first
+and the password second. This avoids repeating a remote command when that command
+exits with SSH's reserved status 255. SSH passwords are passed to `sshpass` through
+`SSHPASS`. Private keys are written only to a temporary mode-0600 file inside a
+mode-0700 directory. Key-only authentication uses `-i`, `IdentitiesOnly=yes`,
+`BatchMode=yes`, and `PasswordAuthentication=no`; combined authentication uses
+`PreferredAuthentications=publickey,password` in the same connection. Neither
+secret is placed in responses, job state, log messages, remote scripts, or generated
+`node.env` files.
+
+The browser sends either credential in the request body. Deployments that enable
+private-key installation should expose the WebUI through HTTPS or a trusted isolated
+network and should use a dedicated deployment key with limited scope.
 
 ### `GET /api/logmonitor/installations/{job_id}`
 
@@ -296,20 +338,48 @@ file
 
 Returns a token and download URL under `/api/generated-files/{token}/content`.
 
+### `GET /api/knowledge/collections`
+
+Returns the collections exposed by the configured vector service. Each item includes its name, point and vector counts, status, schema, and whether it is the service default. This management route requires the internal i2Stream Bearer token.
+
+### `POST /api/knowledge/collections`
+
+Creates a collection through the configured vector service. This management route requires the internal i2Stream Bearer token.
+
+Request:
+
+```json
+{"collection_name":"project-docs"}
+```
+
+Response:
+
+```json
+{
+  "code": 0,
+  "status": "success",
+  "collection": {
+    "collection_name": "project-docs",
+    "message": "collection 'project-docs' 创建成功"
+  }
+}
+```
+
 ### `POST /api/knowledge/files`
 
 Multipart upload endpoint for knowledge documents. The backend validates the filename and extension, then forwards the uploaded file directly to vector service:
 
 ```text
-{VECTOR_SEARCH_HOST}/api/v1/upload_file
+{configured vector_search_host}/api/v1/upload_file
 ```
 
 The backend does not save the source file, does not convert it to text, does not write a knowledge file row into SQLite, and does not add `metadata`.
 
-Field name:
+Multipart fields:
 
 ```text
 file
+collection_name (optional; uses the RAG Service default Collection when omitted)
 ```
 
 Supported v1 formats:
@@ -332,9 +402,9 @@ Response:
 }
 ```
 
-### `GET /api/knowledge/files`
+### `GET /api/knowledge/files?collection_name=project-docs`
 
-Lists files currently present in the vector database. The backend derives Qdrant HTTP URL from `VECTOR_SEARCH_HOST` by using the same scheme and host with port `6335`, then scrolls the `documents` collection and deduplicates by `file_id`.
+Lists files currently present in the selected collection. The backend derives the Qdrant HTTP URL from the saved `vector_search_host` by using the same scheme and host with port `6335`, then scrolls that collection and deduplicates by `file_id`. When `collection_name` is omitted, the backend uses the Collection marked as default by RAG Service.
 
 Response:
 
@@ -350,15 +420,16 @@ Response:
       "file_type": "docx",
       "file_size": 120,
       "upload_time": "2026-07-07T10:00:00",
-      "total_chunks": 3
+      "total_chunks": 3,
+      "collection_name": "project-docs"
     }
   ]
 }
 ```
 
-### `DELETE /api/knowledge/files/{file_id}`
+### `DELETE /api/knowledge/files/{file_id}?collection_name=project-docs`
 
-Deletes all Qdrant points in the `documents` collection whose payload `file_id` exactly matches `{file_id}`. The backend derives the Qdrant HTTP URL from `VECTOR_SEARCH_HOST` by using the same scheme and host with port `6335`.
+Deletes the file through vector service so both its vector chunks and any retained source file are removed from the selected collection. When `collection_name` is omitted, the backend uses the Collection marked as default by RAG Service. Requests for that default Collection omit the upstream query parameter so RAG Service also checks the legacy source-file directory.
 
 Response:
 
@@ -368,14 +439,16 @@ Response:
   "status": "success",
   "file": {
     "file_id": "1783409846_manual.docx",
-    "operation_id": 42
+    "collection_name": "project-docs",
+    "deleted_chunks": 3,
+    "message": "已删除 3 个文本块"
   }
 }
 ```
 
-### `GET /api/knowledge/tasks/{task_id}`
+### `GET /api/knowledge/tasks/{task_id}?collection_name=project-docs`
 
-Proxies a single vector service task status lookup. The upload page uses this endpoint only for the task returned by the current upload.
+Proxies a single vector service task status lookup. Passing `collection_name` also verifies that the task belongs to the collection selected when the upload started. When omitted for legacy clients, RAG Service applies its configured default Collection behavior.
 
 Response:
 

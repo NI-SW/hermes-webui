@@ -978,12 +978,42 @@
       </div>
       <div class="main-view-body i2stream-main-body" id="i2streamMainContent">
         <section class="i2stream-page" id="i2streamKnowledgePage" role="tabpanel" data-i2stream-page="knowledge" aria-labelledby="i2streamKnowledgeTab">
+          <form class="i2stream-knowledge-config" id="i2streamKnowledgeConfig" onsubmit="saveI2StreamKnowledgeConfig(event)">
+            <div class="i2stream-knowledge-config-head">
+              <div>
+                <strong data-i18n="i2stream_knowledge_config_title">Knowledge service</strong>
+                <span data-i18n="i2stream_knowledge_config_hint">Configure the REST and RAG MCP endpoints used by this deployment.</span>
+              </div>
+              <span class="i2stream-knowledge-config-state" id="i2streamKnowledgeConfigState" data-i18n="i2stream_knowledge_config_loading">Loading configuration…</span>
+            </div>
+            <div class="i2stream-knowledge-config-fields">
+              <label><span data-i18n="i2stream_vector_search_host">Vector service REST URL</span><input id="i2streamKnowledgeVectorHost" name="vector_search_host" type="url" required spellcheck="false" autocomplete="off" placeholder="http://192.168.1.20:8900" disabled></label>
+              <label><span data-i18n="i2stream_rag_service_mcp_url">RAG Service MCP URL</span><input id="i2streamKnowledgeRagMcpUrl" name="rag_service_mcp_url" type="url" required spellcheck="false" autocomplete="off" placeholder="http://192.168.1.20:8900/mcp" disabled></label>
+            </div>
+            <div class="i2stream-knowledge-config-actions">
+              <button class="sm-btn" type="button" id="i2streamKnowledgeConfigCheckBtn" onclick="checkI2StreamKnowledgeConfig()" data-i18n="i2stream_knowledge_config_check" disabled>Check connection</button>
+              <button class="sm-btn" type="submit" id="i2streamKnowledgeConfigSaveBtn" data-i18n="i2stream_knowledge_config_save" disabled>Save configuration</button>
+              <span class="i2stream-status" id="i2streamKnowledgeConfigStatus" role="status" aria-live="polite"></span>
+            </div>
+          </form>
+          <div class="i2stream-knowledge-unconfigured" id="i2streamKnowledgeUnconfigured" role="status" data-i18n="i2stream_knowledge_unconfigured" hidden>Configure both knowledge service URLs before managing files.</div>
+          <div class="i2stream-knowledge-collections" id="i2streamKnowledgeCollections" hidden>
+            <label class="i2stream-collection-select" for="i2streamKnowledgeCollectionSelect">
+              <span data-i18n="i2stream_knowledge_collection">Collection</span>
+              <select id="i2streamKnowledgeCollectionSelect" onchange="selectI2StreamKnowledgeCollection(this.value)" disabled></select>
+            </label>
+            <form class="i2stream-collection-create" id="i2streamKnowledgeCollectionCreate" onsubmit="createI2StreamKnowledgeCollection(event)">
+              <label class="sr-only" for="i2streamKnowledgeCollectionName" data-i18n="i2stream_knowledge_collection_name">New collection name</label>
+              <input id="i2streamKnowledgeCollectionName" name="collection_name" type="text" maxlength="128" required autocomplete="off" spellcheck="false" data-i18n-placeholder="i2stream_knowledge_collection_name_placeholder" placeholder="New collection name" disabled>
+              <button class="sm-btn" type="submit" id="i2streamKnowledgeCollectionCreateBtn" data-i18n="i2stream_knowledge_collection_create" disabled>Create</button>
+            </form>
+          </div>
           <form class="i2stream-toolbar" id="i2streamKnowledgeUpload" onsubmit="uploadI2StreamKnowledge(event)">
             <label class="i2stream-file-pick" for="i2streamKnowledgeFile">
-              <input id="i2streamKnowledgeFile" type="file" name="file" accept=".txt,.md,.pdf,.docx,.xls,.xlsx" required>
+              <input id="i2streamKnowledgeFile" type="file" name="file" accept=".txt,.md,.pdf,.docx,.xls,.xlsx" required disabled>
               <span id="i2streamKnowledgeFileLabel" data-i18n="i2stream_choose_file">Choose a knowledge file</span>
             </label>
-            <button class="sm-btn" type="submit" id="i2streamKnowledgeUploadBtn" data-i18n="i2stream_upload">Upload</button>
+            <button class="sm-btn" type="submit" id="i2streamKnowledgeUploadBtn" data-i18n="i2stream_upload" disabled>Upload</button>
           </form>
           <div class="i2stream-batch-actions" id="i2streamKnowledgeBatchActions" hidden>
             <label class="i2stream-check" for="i2streamKnowledgeSelectAll">
@@ -1037,7 +1067,8 @@
                 <label class="i2stream-install-field"><span data-i18n="i2stream_logmonitor_target_ip">Target IP</span><input id="i2streamLogmonitorTargetIp" name="target_ip" type="text" inputmode="decimal" spellcheck="false" required placeholder="192.168.1.20" data-i18n-placeholder="i2stream_logmonitor_target_ip_placeholder"></label>
                 <label class="i2stream-install-field compact"><span data-i18n="i2stream_logmonitor_ssh_port">SSH port</span><input id="i2streamLogmonitorSshPort" name="ssh_port" type="number" inputmode="numeric" min="1" max="65535" value="22" required></label>
                 <label class="i2stream-install-field"><span data-i18n="i2stream_logmonitor_ssh_username">SSH username</span><input id="i2streamLogmonitorSshUsername" name="ssh_username" type="text" spellcheck="false" autocomplete="off" required></label>
-                <label class="i2stream-install-field"><span data-i18n="i2stream_logmonitor_ssh_password">SSH password</span><input id="i2streamLogmonitorSshPassword" name="ssh_password" type="password" autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore="true" required></label>
+                <label class="i2stream-install-field"><span data-i18n="i2stream_logmonitor_ssh_password">SSH password (optional)</span><input id="i2streamLogmonitorSshPassword" name="ssh_password" type="password" autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore="true"></label>
+                <label class="i2stream-install-field wide"><span data-i18n="i2stream_logmonitor_ssh_private_key">SSH private key (optional)</span><input id="i2streamLogmonitorSshPrivateKey" type="file"><small data-i18n="i2stream_logmonitor_ssh_credentials_hint">Provide a password or an unencrypted private key. Private keys may be at most 16 KiB.</small></label>
               </div>
             </fieldset>
             <fieldset class="i2stream-install-card">

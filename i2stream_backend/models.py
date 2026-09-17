@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import base64
+import binascii
 from ipaddress import IPv4Address
 from pathlib import Path
 from pathlib import PurePosixPath
 import re
+import struct
 from typing import Any, Literal
+from urllib.parse import urlparse
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 
 from node_store import normalize_node_ip
 
@@ -96,6 +100,78 @@ class HeartbeatRequest(BaseModel):
         return normalize_node_ip(value)
 
 
+class KnowledgeServiceConfigurationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    vector_search_host: str = Field(min_length=1, max_length=2048)
+    rag_service_mcp_url: str = Field(min_length=1, max_length=2048)
+
+    @field_validator("vector_search_host")
+    @classmethod
+    def validate_vector_search_host(cls, value: str) -> str:
+        return _normalize_service_url(value, expected_path="", field_name="vector_search_host")
+
+    @field_validator("rag_service_mcp_url")
+    @classmethod
+    def validate_rag_service_mcp_url(cls, value: str) -> str:
+        return _normalize_service_url(
+            value,
+            expected_path="/mcp",
+            field_name="rag_service_mcp_url",
+        )
+
+
+class KnowledgeCollectionCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    collection_name: str = Field(min_length=1)
+
+    @field_validator("collection_name")
+    @classmethod
+    def validate_collection_name(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("collection_name must not be blank")
+        if len(normalized) > 128:
+            raise ValueError("collection_name must be at most 128 characters")
+        return normalized
+
+
+def _normalize_service_url(value: str, *, expected_path: str, field_name: str) -> str:
+    if value != value.strip() or any(
+        character.isspace() or ord(character) < 32 or ord(character) == 127
+        for character in value
+    ):
+        raise ValueError(f"{field_name} must not contain whitespace or control characters")
+    parsed = urlparse(value)
+    if parsed.scheme not in {"http", "https"}:
+        raise ValueError(f"{field_name} must start with http:// or https://")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError(f"{field_name} must not include user information")
+    try:
+        port = parsed.port
+    except ValueError:
+        raise ValueError(f"{field_name} must include a valid explicit port") from None
+    if not parsed.hostname or port is None:
+        raise ValueError(f"{field_name} must include a host and explicit port")
+    if parsed.params or parsed.query or parsed.fragment:
+        raise ValueError(f"{field_name} must not include parameters, query, or fragment")
+
+    allowed_paths = {expected_path}
+    if expected_path:
+        allowed_paths.add(f"{expected_path}/")
+    else:
+        allowed_paths.add("/")
+    if parsed.path not in allowed_paths:
+        required_path = expected_path or "/"
+        raise ValueError(f"{field_name} path must be {required_path}")
+
+    host = parsed.hostname
+    if ":" in host:
+        host = f"[{host}]"
+    return f"{parsed.scheme}://{host}:{port}{expected_path}"
+
+
 _REMOTE_USERNAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,63}$")
 _REMOTE_PATH_RE = re.compile(r"^/[A-Za-z0-9_./-]+$")
 
@@ -106,7 +182,18 @@ class LogMonitorPreflightRequest(BaseModel):
     target_ip: str
     ssh_port: int = Field(ge=1, le=65535)
     ssh_username: str
-    ssh_password: SecretStr = Field(min_length=1, max_length=1024, repr=False)
+    ssh_password: SecretStr | None = Field(
+        default=None,
+        min_length=1,
+        max_length=1024,
+        repr=False,
+    )
+    ssh_private_key: SecretStr | None = Field(
+        default=None,
+        min_length=1,
+        max_length=16 * 1024,
+        repr=False,
+    )
     stream_log_monitor: Literal["1"] = Field(alias="STREAM_LOG_MONITOR")
     mcp_iadebug_user: str = Field(alias="MCP_IADEBUG_USER")
     active_home: str = Field(alias="ACTIVE_HOME")
@@ -133,10 +220,60 @@ class LogMonitorPreflightRequest(BaseModel):
 
     @field_validator("ssh_password")
     @classmethod
-    def validate_ssh_password(cls, value: SecretStr) -> SecretStr:
+    def validate_ssh_password(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is None:
+            return None
         if "\x00" in value.get_secret_value():
             raise ValueError("ssh_password must not contain a NUL byte")
         return value
+
+    @field_validator("ssh_private_key")
+    @classmethod
+    def validate_ssh_private_key(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is None:
+            return None
+        private_key = value.get_secret_value()
+        if not private_key.strip():
+            raise ValueError("ssh_private_key must not be blank")
+        if "\x00" in private_key:
+            raise ValueError("ssh_private_key must not contain a NUL byte")
+        upper_key = private_key.upper()
+        if (
+            "-----BEGIN ENCRYPTED PRIVATE KEY-----" in upper_key
+            or "PROC-TYPE: 4,ENCRYPTED" in upper_key
+            or "DEK-INFO:" in upper_key
+            or cls._openssh_key_is_encrypted(private_key)
+        ):
+            raise ValueError("encrypted SSH private keys are not supported")
+        return value
+
+    @staticmethod
+    def _openssh_key_is_encrypted(private_key: str) -> bool:
+        begin = "-----BEGIN OPENSSH PRIVATE KEY-----"
+        end = "-----END OPENSSH PRIVATE KEY-----"
+        if begin not in private_key or end not in private_key:
+            return False
+        encoded = private_key.split(begin, 1)[1].split(end, 1)[0]
+        try:
+            blob = base64.b64decode("".join(encoded.split()), validate=True)
+        except (ValueError, binascii.Error):
+            return False
+        prefix = b"openssh-key-v1\x00"
+        if not blob.startswith(prefix) or len(blob) < len(prefix) + 4:
+            return False
+        offset = len(prefix)
+        cipher_length = struct.unpack(">I", blob[offset : offset + 4])[0]
+        cipher_start = offset + 4
+        cipher_end = cipher_start + cipher_length
+        if cipher_end > len(blob):
+            return False
+        return blob[cipher_start:cipher_end] != b"none"
+
+    @model_validator(mode="after")
+    def validate_ssh_credentials(self) -> "LogMonitorPreflightRequest":
+        if self.ssh_password is None and self.ssh_private_key is None:
+            raise ValueError("ssh_password or ssh_private_key is required")
+        return self
 
     @field_validator("active_home", "stream_home", "stream_data_home")
     @classmethod

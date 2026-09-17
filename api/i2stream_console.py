@@ -43,7 +43,8 @@ WEBUI_PREFIX = "/api/i2stream-console"
 STREAM_CHUNK_BYTES = 64 * 1024
 MAX_BUFFERED_RESPONSE_BYTES = 4 * 1024 * 1024
 MAX_SAFE_MESSAGE_ID = (1 << 53) - 1
-INSTALL_REQUEST_MAX_BYTES = 16 * 1024
+INSTALL_REQUEST_MAX_BYTES = 64 * 1024
+CONFIG_REQUEST_MAX_BYTES = 8 * 1024
 
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
 _CLIENT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
@@ -88,6 +89,7 @@ class ProxyTarget:
     extra_headers: dict[str, str] | None = None
     stream_response: bool = False
     install_route: bool = False
+    privileged_route: bool = False
 
     def __post_init__(self) -> None:
         if self.extra_headers is None:
@@ -132,6 +134,23 @@ def _parse_query(raw_query: str) -> dict[str, list[str]]:
         return parse_qs(raw_query, keep_blank_values=True, strict_parsing=True)
     except ValueError:
         raise ProxyRouteError("Malformed query string") from None
+
+
+def _knowledge_collection_query(parsed) -> str:
+    if not parsed.query:
+        return ""
+    query = _parse_query(parsed.query)
+    if set(query) != {"collection_name"}:
+        raise ProxyRouteError("collection_name is the only supported query parameter")
+    collection_name = _single_query_value(query, "collection_name")
+    if (
+        collection_name is None
+        or collection_name != collection_name.strip()
+        or len(collection_name) > 128
+        or "\x00" in collection_name
+    ):
+        raise ProxyRouteError("Invalid collection_name")
+    return urlencode({"collection_name": collection_name})
 
 
 def _history_listing_target(parsed) -> ProxyTarget:
@@ -201,13 +220,21 @@ def resolve_proxy_target(method: str, parsed) -> ProxyTarget:
         if method != "POST":
             raise ProxyRouteError("Method not allowed", status=405)
         _require_no_query(parsed)
-        return ProxyTarget("/api/logmonitor/preflight", install_route=True)
+        return ProxyTarget(
+            "/api/logmonitor/preflight",
+            install_route=True,
+            privileged_route=True,
+        )
 
     if suffix == "/logmonitor/installations":
         if method != "POST":
             raise ProxyRouteError("Method not allowed", status=405)
         _require_no_query(parsed)
-        return ProxyTarget("/api/logmonitor/installations", install_route=True)
+        return ProxyTarget(
+            "/api/logmonitor/installations",
+            install_route=True,
+            privileged_route=True,
+        )
 
     match = re.fullmatch(r"/logmonitor/installations/([0-9a-f]{32})", suffix)
     if match:
@@ -217,29 +244,50 @@ def resolve_proxy_target(method: str, parsed) -> ProxyTarget:
         return ProxyTarget(
             f"/api/logmonitor/installations/{match.group(1)}",
             install_route=True,
+            privileged_route=True,
         )
+
+    if suffix == "/knowledge/config":
+        if method not in {"GET", "PUT"}:
+            raise ProxyRouteError("Method not allowed", status=405)
+        _require_no_query(parsed)
+        return ProxyTarget("/api/knowledge/config", privileged_route=True)
+
+    if suffix == "/knowledge/config/check":
+        if method != "POST":
+            raise ProxyRouteError("Method not allowed", status=405)
+        _require_no_query(parsed)
+        return ProxyTarget("/api/knowledge/config/check", privileged_route=True)
+
+    if suffix == "/knowledge/collections":
+        if method not in {"GET", "POST"}:
+            raise ProxyRouteError("Method not allowed", status=405)
+        _require_no_query(parsed)
+        return ProxyTarget("/api/knowledge/collections", privileged_route=True)
 
     if suffix == "/knowledge/files":
         if method not in {"GET", "POST"}:
             raise ProxyRouteError("Method not allowed", status=405)
-        _require_no_query(parsed)
-        return ProxyTarget("/api/knowledge/files")
+        query = _knowledge_collection_query(parsed) if method == "GET" else ""
+        if method == "POST":
+            _require_no_query(parsed)
+        return ProxyTarget("/api/knowledge/files", upstream_query=query)
 
     match = re.fullmatch(r"/knowledge/files/([^/]+)", suffix)
     if match:
         if method != "DELETE":
             raise ProxyRouteError("Method not allowed", status=405)
-        _require_no_query(parsed)
+        query = _knowledge_collection_query(parsed)
         file_id = _decode_path_segment(match.group(1), "knowledge file id")
-        return ProxyTarget(f"/api/knowledge/files/{file_id}")
+        return ProxyTarget(f"/api/knowledge/files/{file_id}", upstream_query=query)
 
     match = re.fullmatch(r"/knowledge/tasks/([^/]+)", suffix)
     if match:
         if method != "GET":
             raise ProxyRouteError("Method not allowed", status=405)
-        _require_no_query(parsed)
+        query = _knowledge_collection_query(parsed)
         task_id = _decode_path_segment(match.group(1), "knowledge task id", max_length=256)
-        return ProxyTarget(f"/api/knowledge/tasks/{task_id}")
+        return ProxyTarget(f"/api/knowledge/tasks/{task_id}", upstream_query=query)
 
     if suffix == "/reports":
         if method != "GET":
@@ -383,15 +431,20 @@ def _browser_access_ipv4(handler) -> str:
     return str(address)
 
 
-def _install_callback_host(handler, target: ProxyTarget) -> str | None:
-    if not target.install_route:
-        return None
+def _require_privileged_access(target: ProxyTarget) -> None:
+    if not target.privileged_route:
+        return
     from api.auth import is_auth_enabled
 
     if not is_auth_enabled():
-        raise ProxyRouteError("启用 WebUI 登录保护后才能使用远程安装", status=503)
+        raise ProxyRouteError("启用 WebUI 登录保护后才能使用此管理功能", status=503)
     if not I2STREAM_CONSOLE_BEARER_TOKEN:
-        raise ProxyRouteError("LogMonitor 安装服务未配置内部凭据", status=503)
+        raise ProxyRouteError("i2Stream 管理服务未配置内部凭据", status=503)
+
+
+def _install_callback_host(handler, target: ProxyTarget) -> str | None:
+    if not target.install_route:
+        return None
     if I2STREAM_AGENT_PUBLIC_HOST:
         return None
     return _browser_access_ipv4(handler)
@@ -536,18 +589,30 @@ def handle_proxy(
     if not (path == WEBUI_PREFIX or path.startswith(WEBUI_PREFIX + "/")):
         return False
 
+    request_body_expected = read_request_body
     try:
         target = resolve_proxy_target(method, parsed)
+        small_json_write = target.upstream_path in {
+            "/api/knowledge/config",
+            "/api/knowledge/config/check",
+            "/api/knowledge/collections",
+        } and method.upper() in {"PUT", "POST"}
+        request_body_expected = request_body_expected or small_json_write
+        _require_privileged_access(target)
         callback_host = _install_callback_host(handler, target)
         origin = _validated_upstream_origin()
-        if read_request_body:
+        if read_request_body or small_json_write:
             request_limit = (
                 MAX_UPLOAD_BYTES
                 if method.upper() == "POST" and target.upstream_path == "/api/knowledge/files"
                 else (
-                    INSTALL_REQUEST_MAX_BYTES
-                    if target.install_route
-                    else MAX_BODY_BYTES
+                    CONFIG_REQUEST_MAX_BYTES
+                    if small_json_write
+                    else (
+                        INSTALL_REQUEST_MAX_BYTES
+                        if target.install_route
+                        else MAX_BODY_BYTES
+                    )
                 )
             )
             request_body = _read_request_body(handler, request_limit)
@@ -572,7 +637,7 @@ def handle_proxy(
                 _send_buffered_response(handler, status, response.headers, body)
         return True
     except ProxyRouteError as exc:
-        if read_request_body:
+        if request_body_expected:
             handler.close_connection = True
         bad(handler, str(exc), status=exc.status)
         return True

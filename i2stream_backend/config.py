@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from ipaddress import IPv4Address
 from pathlib import Path
-from urllib.parse import urlparse
-
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -31,7 +29,6 @@ class Settings(BaseSettings):
     public_base_url: str = ""
     proxy_api_key: str = Field(default="", repr=False)
     cors_origins: str = "*"
-    vector_search_host: str
     session_hmac_secret: SecretStr
     gateway_bridge_token: SecretStr
     webui_feedback_bridge_token: SecretStr = SecretStr("")
@@ -90,21 +87,9 @@ class Settings(BaseSettings):
             raise ValueError("I2STREAM_INSTALL_INTERNAL_TOKEN must contain at least 32 UTF-8 bytes")
         return value
 
-    @field_validator("hermes_base_url", "dashboard_hermes_base_url", "vector_search_host")
+    @field_validator("hermes_base_url", "dashboard_hermes_base_url")
     @classmethod
     def strip_trailing_slash(cls, value: str) -> str:
-        return value.rstrip("/")
-
-    @field_validator("vector_search_host")
-    @classmethod
-    def validate_vector_search_host(cls, value: str) -> str:
-        parsed = urlparse(value)
-        if parsed.scheme not in {"http", "https"}:
-            raise ValueError("VECTOR_SEARCH_HOST must start with http:// or https://")
-        if not parsed.hostname or parsed.port is None:
-            raise ValueError("VECTOR_SEARCH_HOST must be in the form http://host:port")
-        if parsed.path not in {"", "/"} or parsed.params or parsed.query or parsed.fragment:
-            raise ValueError("VECTOR_SEARCH_HOST must not include path, query, or fragment")
         return value.rstrip("/")
 
     @property

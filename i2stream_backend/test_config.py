@@ -7,14 +7,13 @@ from unittest.mock import patch
 
 from pydantic import ValidationError
 
-os.environ.setdefault("VECTOR_SEARCH_HOST", "http://127.0.0.1:8900")
 os.environ.setdefault("SESSION_HMAC_SECRET", "session-secret-32-bytes-for-tests!!")
 os.environ.setdefault("GATEWAY_BRIDGE_TOKEN", "gateway-token-32-bytes-for-tests!!!")
 
 from config import Settings
 
 
-class VectorSearchHostConfigTests(unittest.TestCase):
+class SettingsConfigTests(unittest.TestCase):
     secret_settings = {
         "session_hmac_secret": "session-secret-32-bytes-for-tests!!",
         "gateway_bridge_token": "gateway-token-32-bytes-for-tests!!!",
@@ -24,7 +23,6 @@ class VectorSearchHostConfigTests(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=True):
             settings = Settings(
                 _env_file=None,
-                vector_search_host="http://127.0.0.1:8900",
                 **self.secret_settings,
             )
 
@@ -34,7 +32,6 @@ class VectorSearchHostConfigTests(unittest.TestCase):
     def test_dashboard_agent_defaults_to_8641_and_redacts_its_key(self) -> None:
         settings = Settings(
             _env_file=None,
-            vector_search_host="http://127.0.0.1:8900",
             dashboard_hermes_api_key="stream-qa-secret",
             **self.secret_settings,
         )
@@ -46,7 +43,6 @@ class VectorSearchHostConfigTests(unittest.TestCase):
     def test_feedback_hermes_api_key_is_redacted(self) -> None:
         settings = Settings(
             _env_file=None,
-            vector_search_host="http://127.0.0.1:8900",
             hermes_api_key="feedback-hermes-secret",
             **self.secret_settings,
         )
@@ -57,41 +53,22 @@ class VectorSearchHostConfigTests(unittest.TestCase):
         )
         self.assertNotIn("feedback-hermes-secret", repr(settings))
 
-    def test_vector_search_host_accepts_http_host_port(self) -> None:
-        settings = Settings(
-            _env_file=None,
-            vector_search_host="http://192.168.34.65:8900",
-            **self.secret_settings,
-        )
+    def test_vector_search_host_environment_variable_is_not_runtime_settings(self) -> None:
+        with patch.dict(os.environ, {"VECTOR_SEARCH_HOST": "http://192.168.34.65:8900"}):
+            settings = Settings(_env_file=None, **self.secret_settings)
 
-        self.assertEqual(settings.vector_search_host, "http://192.168.34.65:8900")
-
-    def test_vector_search_host_strips_trailing_slash(self) -> None:
-        settings = Settings(
-            _env_file=None,
-            vector_search_host="http://192.168.34.65:8900/",
-            **self.secret_settings,
-        )
-
-        self.assertEqual(settings.vector_search_host, "http://192.168.34.65:8900")
-
-    def test_vector_search_host_rejects_missing_port(self) -> None:
-        with self.assertRaises(ValidationError):
-            Settings(
-                _env_file=None,
-                vector_search_host="http://192.168.34.65",
-                **self.secret_settings,
-            )
+        self.assertFalse(hasattr(settings, "vector_search_host"))
 
     def test_vector_service_base_url_is_not_supported(self) -> None:
         with patch.dict(os.environ, {"VECTOR_SERVICE_BASE_URL": "http://192.168.34.65:8900"}, clear=True):
-            with self.assertRaises(ValidationError):
-                Settings(_env_file=None)
+            settings = Settings(_env_file=None, **self.secret_settings)
+
+        self.assertFalse(hasattr(settings, "vector_service_base_url"))
 
     def test_bridge_secrets_are_required(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
             with self.assertRaises(ValidationError) as raised:
-                Settings(_env_file=None, vector_search_host="http://127.0.0.1:8900")
+                Settings(_env_file=None)
 
         errors = raised.exception.errors()
         self.assertEqual(
@@ -103,7 +80,6 @@ class VectorSearchHostConfigTests(unittest.TestCase):
         with self.assertRaises(ValidationError) as raised:
             Settings(
                 _env_file=None,
-                vector_search_host="http://127.0.0.1:8900",
                 session_hmac_secret="short",
                 gateway_bridge_token="also-short",
             )
@@ -116,7 +92,6 @@ class VectorSearchHostConfigTests(unittest.TestCase):
     def test_bridge_secret_values_are_redacted_from_repr(self) -> None:
         settings = Settings(
             _env_file=None,
-            vector_search_host="http://127.0.0.1:8900",
             **self.secret_settings,
         )
 
@@ -127,7 +102,6 @@ class VectorSearchHostConfigTests(unittest.TestCase):
     def test_webui_feedback_bridge_token_is_redacted(self) -> None:
         settings = Settings(
             _env_file=None,
-            vector_search_host="http://127.0.0.1:8900",
             webui_feedback_bridge_token="native-feedback-secret-at-least-32-bytes",
             **self.secret_settings,
         )
@@ -142,7 +116,6 @@ class VectorSearchHostConfigTests(unittest.TestCase):
         with self.assertRaises(ValidationError) as raised:
             Settings(
                 _env_file=None,
-                vector_search_host="http://127.0.0.1:8900",
                 webui_feedback_bridge_token="short",
                 **self.secret_settings,
             )
@@ -155,7 +128,6 @@ class VectorSearchHostConfigTests(unittest.TestCase):
     def test_logmonitor_install_configuration_is_strict_and_redacted(self) -> None:
         settings = Settings(
             _env_file=None,
-            vector_search_host="http://127.0.0.1:8900",
             i2stream_install_internal_token="install-token-at-least-32-bytes-long",
             agent_public_host="192.168.34.65",
             agent_base_url_port=18642,
@@ -180,7 +152,6 @@ class VectorSearchHostConfigTests(unittest.TestCase):
             with self.subTest(invalid=invalid), self.assertRaises(ValidationError):
                 Settings(
                     _env_file=None,
-                    vector_search_host="http://127.0.0.1:8900",
                     agent_public_host=invalid,
                     **self.secret_settings,
                 )
@@ -188,7 +159,6 @@ class VectorSearchHostConfigTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             Settings(
                 _env_file=None,
-                vector_search_host="http://127.0.0.1:8900",
                 i2stream_install_internal_token="short",
                 **self.secret_settings,
             )
@@ -196,7 +166,6 @@ class VectorSearchHostConfigTests(unittest.TestCase):
     def test_datacop_uses_built_in_agent_project_defaults(self) -> None:
         settings = Settings(
             _env_file=None,
-            vector_search_host="http://127.0.0.1:8900",
             **self.secret_settings,
         )
 
@@ -222,7 +191,6 @@ class VectorSearchHostConfigTests(unittest.TestCase):
         with patch.dict(os.environ, overrides, clear=False):
             settings = Settings(
                 _env_file=None,
-                vector_search_host="http://127.0.0.1:8900",
                 **self.secret_settings,
             )
 

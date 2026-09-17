@@ -31,6 +31,7 @@ def test_webui_facade_upstreams_exist_in_bundled_backend() -> None:
     routes = _registered_backend_routes()
 
     assert {
+        "/api/knowledge/collections",
         "/api/knowledge/files",
         "/api/knowledge/files/{file_id}",
         "/api/knowledge/tasks/{task_id}",

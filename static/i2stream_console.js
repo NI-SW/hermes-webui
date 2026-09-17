@@ -5,12 +5,19 @@ const I2STREAM_API = '/api/i2stream-console';
 const I2STREAM_HISTORY_PAGE_SIZE = 30;
 const I2STREAM_NODES_POLL_INTERVAL_MS = 30_000;
 const I2STREAM_INSTALL_POLL_INTERVAL_MS = 2_000;
+const I2STREAM_PRIVATE_KEY_MAX_BYTES = 16 * 1024;
 const I2STREAM_SECTIONS = new Set(['knowledge', 'reports', 'history', 'nodes', 'logmonitor']);
 const I2STREAM_CLIENT_ID_RE = /^[A-Za-z0-9_-]{16,128}$/;
 const _i2streamState = {
   section: 'knowledge',
   loaded: {knowledge: false, reports: false, history: false, nodes: false, logmonitor: true},
   knowledgeFiles: [],
+  knowledgeCollections: [],
+  selectedKnowledgeCollection: null,
+  knowledgeConfiguration: null,
+  knowledgeConfigBusy: false,
+  knowledgeCollectionBusy: false,
+  knowledgeUploadInFlight: false,
   selectedKnowledgeFileIds: new Set(),
   knowledgeDeleteInFlight: false,
   reports: [],
@@ -112,11 +119,19 @@ function parseConversationDetail(value) {
   return {conversationId, messages};
 }
 
-function parseKnowledgeFiles(value) {
+function parseKnowledgeFiles(value, expectedCollectionName) {
   const payload = _i2Success(value, 'knowledge files');
+  const collectionName = _i2ContractString(expectedCollectionName, 'selected knowledge collection');
   if (!Array.isArray(payload.files)) throw new TypeError('knowledge files must be an array');
   return payload.files.map((raw, index) => {
     const item = _i2ContractObject(raw, `knowledge file ${index}`);
+    const itemCollectionName = _i2ContractString(
+      item.collection_name,
+      `knowledge file ${index} collection_name`,
+    );
+    if (itemCollectionName !== collectionName) {
+      throw new TypeError(`knowledge file ${index} belongs to a different collection`);
+    }
     if (!(item.file_size === null || (Number.isSafeInteger(item.file_size) && item.file_size >= 0))) {
       throw new TypeError(`knowledge file ${index} file_size must be a non-negative safe integer or null`);
     }
@@ -130,8 +145,204 @@ function parseKnowledgeFiles(value) {
       fileSize: item.file_size,
       uploadTime: _i2ContractString(item.upload_time, `knowledge file ${index} upload_time`, true),
       totalChunks: item.total_chunks,
+      collectionName: itemCollectionName,
     };
   });
+}
+
+function _i2NonNegativeSafeInteger(value, label) {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new TypeError(`${label} must be a non-negative safe integer`);
+  }
+  return value;
+}
+
+function parseKnowledgeCollections(value) {
+  const payload = _i2Success(value, 'knowledge collections');
+  if (!Array.isArray(payload.collections)) {
+    throw new TypeError('knowledge collections must be an array');
+  }
+  const total = _i2NonNegativeSafeInteger(payload.total, 'knowledge collections total');
+  if (total !== payload.collections.length) {
+    throw new TypeError('knowledge collections total must match the collection count');
+  }
+  const names = new Set();
+  let defaultCount = 0;
+  const collections = payload.collections.map((raw, index) => {
+    const item = _i2ContractObject(raw, `knowledge collection ${index}`);
+    const name = _i2ContractString(item.name, `knowledge collection ${index} name`);
+    if (names.has(name)) throw new TypeError(`knowledge collection ${index} name must be unique`);
+    names.add(name);
+    if (typeof item.is_default !== 'boolean') {
+      throw new TypeError(`knowledge collection ${index} is_default must be a boolean`);
+    }
+    if (item.is_default) defaultCount += 1;
+    return {
+      name,
+      pointsCount: _i2NonNegativeSafeInteger(
+        item.points_count,
+        `knowledge collection ${index} points_count`,
+      ),
+      vectorsCount: _i2NonNegativeSafeInteger(
+        item.vectors_count,
+        `knowledge collection ${index} vectors_count`,
+      ),
+      status: _i2ContractString(item.status, `knowledge collection ${index} status`),
+      schema: _i2ContractString(item.schema, `knowledge collection ${index} schema`),
+      isDefault: item.is_default,
+    };
+  });
+  if (defaultCount > 1) throw new TypeError('knowledge collections must not contain multiple defaults');
+  return collections;
+}
+
+function chooseKnowledgeCollection(collections, preferredName) {
+  if (!Array.isArray(collections)) throw new TypeError('knowledge collections must be an array');
+  if (collections.length === 0) throw new TypeError(_i2Text('i2stream_knowledge_no_collections'));
+  if (preferredName !== null) {
+    const preferred = _i2ContractString(preferredName, 'preferred knowledge collection');
+    if (collections.some(collection => collection.name === preferred)) return preferred;
+  }
+  const defaultCollection = collections.find(collection => collection.isDefault);
+  return defaultCollection ? defaultCollection.name : collections[0].name;
+}
+
+function knowledgeCollectionUrl(path, collectionName) {
+  const query = new URLSearchParams({
+    collection_name: _i2ContractString(collectionName, 'knowledge collection'),
+  });
+  return `${I2STREAM_API}${_i2ContractString(path, 'knowledge API path')}?${query.toString()}`;
+}
+
+function parseCreatedKnowledgeCollection(value) {
+  const payload = _i2Success(value, 'created knowledge collection');
+  const collection = _i2ContractObject(payload.collection, 'created knowledge collection payload');
+  return {
+    name: _i2ContractString(collection.collection_name, 'created knowledge collection name'),
+    message: _i2ContractString(collection.message, 'created knowledge collection message'),
+  };
+}
+
+async function createKnowledgeCollectionRequest(rawName) {
+  const name = _i2ContractString(rawName, 'knowledge collection name').trim();
+  if (!name) throw new TypeError(_i2Text('i2stream_knowledge_collection_name_required'));
+  const created = parseCreatedKnowledgeCollection(await api(`${I2STREAM_API}/knowledge/collections`, {
+    method: 'POST',
+    body: JSON.stringify({collection_name: name}),
+  }));
+  if (created.name !== name) {
+    throw new TypeError('created knowledge collection name does not match the request');
+  }
+  return created;
+}
+
+function parseKnowledgeConfiguration(value) {
+  const payload = _i2Success(value, 'knowledge configuration');
+  const raw = _i2ContractObject(payload.configuration, 'knowledge configuration payload');
+  if (typeof raw.configured !== 'boolean') {
+    throw new TypeError('knowledge configuration configured must be a boolean');
+  }
+  const vectorSearchHost = _i2ContractString(
+    raw.vector_search_host,
+    'knowledge configuration vector_search_host',
+    !raw.configured,
+  );
+  const ragServiceMcpUrl = _i2ContractString(
+    raw.rag_service_mcp_url,
+    'knowledge configuration rag_service_mcp_url',
+    !raw.configured,
+  );
+  const updatedAt = raw.updated_at === null
+    ? null
+    : _i2ContractString(raw.updated_at, 'knowledge configuration updated_at');
+  if (raw.configured && (!vectorSearchHost || !ragServiceMcpUrl)) {
+    throw new TypeError('configured knowledge service requires both URLs');
+  }
+  return {configured: raw.configured, vectorSearchHost, ragServiceMcpUrl, updatedAt};
+}
+
+function normalizeKnowledgeConfiguration(raw) {
+  const values = _i2ContractObject(raw, 'knowledge configuration form');
+  const vectorSearchHost = _i2ContractString(
+    values.vector_search_host,
+    'knowledge configuration vector_search_host',
+  ).trim();
+  const ragServiceMcpUrl = _i2ContractString(
+    values.rag_service_mcp_url,
+    'knowledge configuration rag_service_mcp_url',
+  ).trim();
+  if (!vectorSearchHost || !ragServiceMcpUrl) {
+    throw new TypeError(_i2Text('i2stream_knowledge_config_invalid'));
+  }
+  return {
+    vector_search_host: vectorSearchHost,
+    rag_service_mcp_url: ragServiceMcpUrl,
+  };
+}
+
+function parseKnowledgeConnectionCheck(value) {
+  const configuration = parseKnowledgeConfiguration(value);
+  const payload = _i2ContractObject(value, 'knowledge connection check');
+  const checks = _i2ContractObject(payload.checks, 'knowledge connection checks');
+  ['vector_search', 'rag_service_mcp'].forEach(name => {
+    const check = _i2ContractObject(checks[name], `knowledge connection check ${name}`);
+    if (check.status !== 'reachable') {
+      throw new TypeError(`knowledge connection check ${name} is not reachable`);
+    }
+    _i2ContractString(check.url, `knowledge connection check ${name} url`);
+  });
+  return configuration;
+}
+
+function _i2KnowledgeProfileNames(value, label) {
+  if (!Array.isArray(value)) throw new TypeError(`${label} must be an array`);
+  return value.map((name, index) => _i2ContractString(name, `${label} ${index}`));
+}
+
+function parseKnowledgeMcpSync(value) {
+  const payload = _i2Success(value, 'knowledge MCP sync');
+  const mcp = _i2ContractObject(payload.mcp, 'knowledge MCP sync payload');
+  if (typeof mcp.reload_required !== 'boolean') {
+    throw new TypeError('knowledge MCP sync reload_required must be a boolean');
+  }
+  return {
+    ragServiceMcpUrl: _i2ContractString(mcp.rag_service_mcp_url, 'knowledge MCP sync URL'),
+    configuredProfiles: _i2KnowledgeProfileNames(
+      mcp.configured_profiles,
+      'knowledge MCP sync configured_profiles',
+    ),
+    missingProfiles: _i2KnowledgeProfileNames(
+      mcp.missing_profiles,
+      'knowledge MCP sync missing_profiles',
+    ),
+    reloadRequired: mcp.reload_required,
+  };
+}
+
+async function saveKnowledgeConfigurationRequest(payload) {
+  const values = normalizeKnowledgeConfiguration(payload);
+  const configuration = parseKnowledgeConfiguration(await api(`${I2STREAM_API}/knowledge/config`, {
+    method: 'PUT',
+    body: JSON.stringify(values),
+  }));
+  if (!configuration.configured) {
+    throw new TypeError('saved knowledge configuration must be configured');
+  }
+  try {
+    const mcp = parseKnowledgeMcpSync(await api('/api/rag-service-mcp', {
+      method: 'PUT',
+      body: JSON.stringify({rag_service_mcp_url: configuration.ragServiceMcpUrl}),
+    }));
+    if (mcp.ragServiceMcpUrl !== configuration.ragServiceMcpUrl) {
+      throw new TypeError('Hermes MCP sync returned a different RAG service URL');
+    }
+    return {configuration, mcp, mcpSyncError: null};
+  } catch (error) {
+    const mcpSyncError = error && typeof error.message === 'string'
+      ? error
+      : new Error(String(error));
+    return {configuration, mcp: null, mcpSyncError};
+  }
 }
 
 function parseNodes(value) {
@@ -225,7 +436,14 @@ function normalizeLogmonitorPayload(raw) {
     payload[name] = _i2ContractString(values[name], `LogMonitor ${name}`).trim();
     if (!payload[name]) throw new TypeError(`LogMonitor ${name} must not be blank`);
   });
-  payload.ssh_password = _i2ContractString(values.ssh_password, 'LogMonitor ssh_password');
+  ['ssh_password', 'ssh_private_key'].forEach(name => {
+    if (!Object.prototype.hasOwnProperty.call(values, name)) return;
+    const value = _i2ContractString(values[name], `LogMonitor ${name}`, true);
+    if (value) payload[name] = value;
+  });
+  if (!payload.ssh_password && !payload.ssh_private_key) {
+    throw new TypeError('LogMonitor requires an SSH password or private key');
+  }
   const port = Number(values.ssh_port);
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
     throw new TypeError('LogMonitor ssh_port must be an integer from 1 to 65535');
@@ -255,10 +473,14 @@ function reconcileKnowledgeSelection(files, selectedFileIds) {
     .filter(fileId => selectedFileIds.has(fileId)));
 }
 
-async function _i2DeleteKnowledgeFiles(files) {
+async function _i2DeleteKnowledgeFiles(files, collectionName) {
   if (!Array.isArray(files) || files.length === 0) {
     throw new TypeError('knowledge deletion requires at least one file');
   }
+  const capturedCollectionName = _i2ContractString(
+    collectionName,
+    'knowledge deletion collection',
+  );
   const targets = files.map((raw, index) => {
     const file = _i2ContractObject(raw, `knowledge deletion file ${index}`);
     return {
@@ -268,7 +490,10 @@ async function _i2DeleteKnowledgeFiles(files) {
   });
   const results = await Promise.allSettled(targets.map(async file => {
     _i2Success(
-      await api(`${I2STREAM_API}/knowledge/files/${encodeURIComponent(file.fileId)}`, {method: 'DELETE'}),
+      await api(knowledgeCollectionUrl(
+        `/knowledge/files/${encodeURIComponent(file.fileId)}`,
+        capturedCollectionName,
+      ), {method: 'DELETE'}),
       `knowledge delete ${file.fileId}`,
     );
     return file.fileId;
@@ -581,13 +806,37 @@ function _i2SetStatus(id, message, kind = '') {
   element.dataset.kind = kind;
 }
 
-function _i2LogmonitorFormPayload() {
+async function readLogmonitorPrivateKey(file) {
+  if (!Number.isSafeInteger(file.size) || file.size < 0 || typeof file.text !== 'function') {
+    throw new TypeError('LogMonitor SSH private key file is invalid');
+  }
+  if (file.size > I2STREAM_PRIVATE_KEY_MAX_BYTES) {
+    throw new TypeError(_i2Text('i2stream_logmonitor_ssh_private_key_too_large'));
+  }
+  return file.text();
+}
+
+async function _i2LogmonitorFormPayload() {
   const form = document.getElementById('i2streamLogmonitorForm');
   if (!form) throw new Error('LogMonitor form is unavailable');
   if (!form.reportValidity()) throw new TypeError(_i2Text('i2stream_logmonitor_invalid_form'));
   const values = {};
   new FormData(form).forEach((value, key) => { values[key] = value; });
+  const privateKeyInput = document.getElementById('i2streamLogmonitorSshPrivateKey');
+  if (privateKeyInput?.files.length === 1) {
+    values.ssh_private_key = await readLogmonitorPrivateKey(privateKeyInput.files[0]);
+  }
+  if (!values.ssh_password && !values.ssh_private_key) {
+    throw new TypeError(_i2Text('i2stream_logmonitor_ssh_credentials_required'));
+  }
   return normalizeLogmonitorPayload(values);
+}
+
+function _i2ClearLogmonitorCredentials() {
+  const password = document.getElementById('i2streamLogmonitorSshPassword');
+  if (password) password.value = '';
+  const privateKey = document.getElementById('i2streamLogmonitorSshPrivateKey');
+  if (privateKey) privateKey.value = '';
 }
 
 function redactLogmonitorText(value, password) {
@@ -676,7 +925,7 @@ async function preflightI2StreamLogmonitor(event) {
   const generation = ++_i2streamState.logmonitorRequestGeneration;
   let payload;
   try {
-    payload = _i2LogmonitorFormPayload();
+    payload = await _i2LogmonitorFormPayload();
   } catch (error) {
     _i2SetStatus('i2streamLogmonitorStatus', error.message, 'error');
     return;
@@ -752,8 +1001,7 @@ async function _i2PollLogmonitorJob(jobId, generation) {
       _i2streamState.logmonitorJobId = null;
       _i2StopLogmonitorPolling();
       _i2SetLogmonitorBusy(false);
-      const password = document.getElementById('i2streamLogmonitorSshPassword');
-      if (password) password.value = '';
+      _i2ClearLogmonitorCredentials();
       _i2InvalidateLogmonitorPreflight(true);
       return;
     }
@@ -783,7 +1031,7 @@ async function installI2StreamLogmonitor() {
   if (!preflight?.passed || _i2streamState.logmonitorJobId !== null) return;
   let payload;
   try {
-    payload = _i2LogmonitorFormPayload();
+    payload = await _i2LogmonitorFormPayload();
   } catch (error) {
     _i2InvalidateLogmonitorPreflight();
     _i2SetStatus('i2streamLogmonitorStatus', error.message, 'error');
@@ -801,6 +1049,7 @@ async function installI2StreamLogmonitor() {
     if (generation !== _i2streamState.logmonitorRequestGeneration) return;
     _i2streamState.logmonitorJobId = job.jobId;
     _i2RenderLogmonitorJob(job);
+    _i2ClearLogmonitorCredentials();
     await _i2PollLogmonitorJob(job.jobId, generation);
   } catch (error) {
     if (generation !== _i2streamState.logmonitorRequestGeneration) return;
@@ -1055,11 +1304,174 @@ async function deleteI2StreamNode(ip) {
   }
 }
 
+function _i2KnowledgeConfigPayload() {
+  const form = document.getElementById('i2streamKnowledgeConfig');
+  if (!form || !form.reportValidity()) {
+    throw new TypeError(_i2Text('i2stream_knowledge_config_invalid'));
+  }
+  const values = {};
+  new FormData(form).forEach((value, key) => { values[key] = value; });
+  return normalizeKnowledgeConfiguration(values);
+}
+
+function _i2SetKnowledgeConfigBusy(busy) {
+  _i2streamState.knowledgeConfigBusy = busy;
+  const form = document.getElementById('i2streamKnowledgeConfig');
+  if (form) form.querySelectorAll('input, button').forEach(control => { control.disabled = busy; });
+  _i2RenderKnowledgeSelectionControls();
+}
+
+function _i2RenderKnowledgeConfiguration(configuration) {
+  _i2streamState.knowledgeConfiguration = configuration;
+  const vectorHost = document.getElementById('i2streamKnowledgeVectorHost');
+  const ragMcpUrl = document.getElementById('i2streamKnowledgeRagMcpUrl');
+  if (vectorHost) vectorHost.value = configuration.vectorSearchHost || '';
+  if (ragMcpUrl) ragMcpUrl.value = configuration.ragServiceMcpUrl || '';
+  const state = document.getElementById('i2streamKnowledgeConfigState');
+  if (state) {
+    const stateKey = configuration.configured
+      ? 'i2stream_knowledge_config_configured'
+      : 'i2stream_knowledge_config_not_configured';
+    state.className = `i2stream-knowledge-config-state${configuration.configured ? ' configured' : ''}`;
+    state.dataset.i18n = stateKey;
+    state.textContent = _i2Text(stateKey);
+  }
+  const unconfigured = document.getElementById('i2streamKnowledgeUnconfigured');
+  if (unconfigured) unconfigured.hidden = configuration.configured;
+  const form = document.getElementById('i2streamKnowledgeConfig');
+  if (form) form.querySelectorAll('input, button').forEach(control => {
+    control.disabled = _i2streamState.knowledgeConfigBusy;
+  });
+  _i2RenderKnowledgeSelectionControls();
+}
+
+async function checkI2StreamKnowledgeConfig() {
+  let payload;
+  try {
+    payload = _i2KnowledgeConfigPayload();
+  } catch (error) {
+    _i2SetStatus('i2streamKnowledgeConfigStatus', error.message, 'error');
+    return;
+  }
+  _i2SetKnowledgeConfigBusy(true);
+  _i2SetStatus('i2streamKnowledgeConfigStatus', _i2Text('i2stream_knowledge_config_checking'));
+  try {
+    parseKnowledgeConnectionCheck(await api(`${I2STREAM_API}/knowledge/config/check`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }));
+    _i2SetStatus('i2streamKnowledgeConfigStatus', _i2Text('i2stream_knowledge_config_check_passed'));
+  } catch (error) {
+    _i2SetStatus('i2streamKnowledgeConfigStatus', `${_i2Text('error_prefix')}${error.message}`, 'error');
+  } finally {
+    _i2SetKnowledgeConfigBusy(false);
+  }
+}
+
+async function saveI2StreamKnowledgeConfig(event) {
+  event.preventDefault();
+  let payload;
+  try {
+    payload = _i2KnowledgeConfigPayload();
+  } catch (error) {
+    _i2SetStatus('i2streamKnowledgeConfigStatus', error.message, 'error');
+    return;
+  }
+  _i2streamState.requestGeneration.knowledge += 1;
+  _i2SetKnowledgeConfigBusy(true);
+  _i2SetStatus('i2streamKnowledgeConfigStatus', _i2Text('i2stream_knowledge_config_saving'));
+  try {
+    const saved = await saveKnowledgeConfigurationRequest(payload);
+    _i2RenderKnowledgeConfiguration(saved.configuration);
+    await loadI2StreamKnowledge();
+    if (saved.mcpSyncError) {
+      _i2SetStatus(
+        'i2streamKnowledgeConfigStatus',
+        _i2Text('i2stream_knowledge_mcp_sync_failed', saved.mcpSyncError.message),
+        'error',
+      );
+    } else if (_i2streamState.knowledgeConfiguration?.configured === true) {
+      let message = _i2Text(
+        saved.mcp.reloadRequired
+          ? 'i2stream_knowledge_mcp_reload_required'
+          : 'i2stream_knowledge_config_saved',
+      );
+      if (saved.mcp.missingProfiles.length) {
+        message += ` ${_i2Text('i2stream_knowledge_mcp_missing_profiles', saved.mcp.missingProfiles.join(', '))}`;
+      }
+      _i2SetStatus(
+        'i2streamKnowledgeConfigStatus',
+        message,
+        saved.mcp.missingProfiles.length ? 'warning' : '',
+      );
+    }
+  } catch (error) {
+    _i2SetStatus('i2streamKnowledgeConfigStatus', `${_i2Text('error_prefix')}${error.message}`, 'error');
+  } finally {
+    _i2SetKnowledgeConfigBusy(false);
+  }
+}
+
 async function loadI2StreamKnowledge() {
   const generation = ++_i2streamState.requestGeneration.knowledge;
+  _i2SetStatus('i2streamKnowledgeConfigStatus', _i2Text('i2stream_knowledge_config_loading'));
   _i2SetStatus('i2streamKnowledgeStatus', _i2Text('loading'));
+  let configuration;
   try {
-    const files = parseKnowledgeFiles(await api(`${I2STREAM_API}/knowledge/files`));
+    configuration = parseKnowledgeConfiguration(
+      await api(`${I2STREAM_API}/knowledge/config`),
+    );
+    if (generation !== _i2streamState.requestGeneration.knowledge) return false;
+    _i2RenderKnowledgeConfiguration(configuration);
+    _i2SetStatus('i2streamKnowledgeConfigStatus', '');
+    if (!configuration.configured) {
+      _i2streamState.knowledgeFiles = [];
+      _i2streamState.knowledgeCollections = [];
+      _i2streamState.selectedKnowledgeCollection = null;
+      _i2streamState.selectedKnowledgeFileIds = new Set();
+      _i2streamState.loaded.knowledge = true;
+      _i2RenderKnowledge();
+      _i2SetStatus('i2streamKnowledgeStatus', '');
+      return true;
+    }
+  } catch (error) {
+    if (generation !== _i2streamState.requestGeneration.knowledge) return false;
+    _i2streamState.knowledgeFiles = [];
+    _i2streamState.knowledgeCollections = [];
+    _i2streamState.selectedKnowledgeCollection = null;
+    _i2streamState.selectedKnowledgeFileIds = new Set();
+    _i2streamState.loaded.knowledge = false;
+    _i2streamState.knowledgeConfiguration = null;
+    const unconfigured = document.getElementById('i2streamKnowledgeUnconfigured');
+    if (unconfigured) unconfigured.hidden = false;
+    const configState = document.getElementById('i2streamKnowledgeConfigState');
+    if (configState) {
+      configState.className = 'i2stream-knowledge-config-state';
+      configState.dataset.i18n = 'i2stream_knowledge_config_not_configured';
+      configState.textContent = _i2Text('i2stream_knowledge_config_not_configured');
+    }
+    _i2SetStatus('i2streamKnowledgeConfigStatus', `${_i2Text('error_prefix')}${error.message}`, 'error');
+    _i2RenderFailure('i2streamKnowledgeList', 'i2streamKnowledgeStatus', error);
+    _i2SetKnowledgeConfigBusy(false);
+    return false;
+  }
+
+  try {
+    const collections = parseKnowledgeCollections(
+      await api(`${I2STREAM_API}/knowledge/collections`),
+    );
+    const collectionName = chooseKnowledgeCollection(
+      collections,
+      _i2streamState.selectedKnowledgeCollection,
+    );
+    if (generation !== _i2streamState.requestGeneration.knowledge) return false;
+    _i2streamState.knowledgeCollections = collections;
+    _i2streamState.selectedKnowledgeCollection = collectionName;
+    _i2RenderKnowledgeCollectionControls();
+    const files = parseKnowledgeFiles(
+      await api(knowledgeCollectionUrl('/knowledge/files', collectionName)),
+      collectionName,
+    );
     if (generation !== _i2streamState.requestGeneration.knowledge) return false;
     _i2streamState.knowledgeFiles = files;
     _i2streamState.selectedKnowledgeFileIds = reconcileKnowledgeSelection(
@@ -1073,11 +1485,109 @@ async function loadI2StreamKnowledge() {
   } catch (error) {
     if (generation !== _i2streamState.requestGeneration.knowledge) return false;
     _i2streamState.knowledgeFiles = [];
+    _i2streamState.knowledgeCollections = [];
+    _i2streamState.selectedKnowledgeCollection = null;
     _i2streamState.selectedKnowledgeFileIds = new Set();
     _i2streamState.loaded.knowledge = false;
     _i2RenderFailure('i2streamKnowledgeList', 'i2streamKnowledgeStatus', error);
     _i2RenderKnowledgeSelectionControls();
     return false;
+  }
+}
+
+function _i2SelectedKnowledgeCollection() {
+  const collectionName = _i2streamState.selectedKnowledgeCollection;
+  if (collectionName === null) throw new TypeError(_i2Text('i2stream_knowledge_no_collections'));
+  return _i2ContractString(collectionName, 'selected knowledge collection');
+}
+
+function _i2KnowledgeOperationLocked() {
+  return _i2streamState.knowledgeConfigBusy ||
+    _i2streamState.knowledgeCollectionBusy ||
+    _i2streamState.knowledgeUploadInFlight ||
+    _i2streamState.knowledgeDeleteInFlight;
+}
+
+function _i2RenderKnowledgeCollectionControls() {
+  const configured = _i2streamState.knowledgeConfiguration?.configured === true;
+  const container = document.getElementById('i2streamKnowledgeCollections');
+  const select = document.getElementById('i2streamKnowledgeCollectionSelect');
+  const nameInput = document.getElementById('i2streamKnowledgeCollectionName');
+  const createButton = document.getElementById('i2streamKnowledgeCollectionCreateBtn');
+  const locked = !configured || _i2KnowledgeOperationLocked();
+  if (container) container.hidden = !configured;
+  if (select) {
+    select.innerHTML = _i2streamState.knowledgeCollections.map(collection => {
+      const suffix = collection.isDefault ? ` · ${_i2Text('i2stream_knowledge_collection_default')}` : '';
+      return `<option value="${_i2Escape(collection.name)}">${_i2Escape(collection.name)}${_i2Escape(suffix)}</option>`;
+    }).join('');
+    select.value = _i2streamState.selectedKnowledgeCollection || '';
+    select.disabled = locked || _i2streamState.knowledgeCollections.length === 0;
+  }
+  if (nameInput) nameInput.disabled = locked;
+  if (createButton) createButton.disabled = locked;
+}
+
+async function _i2LoadSelectedKnowledgeFiles(collectionName) {
+  const capturedCollectionName = _i2ContractString(collectionName, 'selected knowledge collection');
+  const generation = ++_i2streamState.requestGeneration.knowledge;
+  _i2SetStatus('i2streamKnowledgeStatus', _i2Text('loading'));
+  try {
+    const files = parseKnowledgeFiles(
+      await api(knowledgeCollectionUrl('/knowledge/files', capturedCollectionName)),
+      capturedCollectionName,
+    );
+    if (generation !== _i2streamState.requestGeneration.knowledge ||
+        capturedCollectionName !== _i2streamState.selectedKnowledgeCollection) return false;
+    _i2streamState.knowledgeFiles = files;
+    _i2streamState.selectedKnowledgeFileIds = new Set();
+    _i2streamState.loaded.knowledge = true;
+    _i2RenderKnowledge();
+    _i2SetStatus('i2streamKnowledgeStatus', '');
+    return true;
+  } catch (error) {
+    if (generation !== _i2streamState.requestGeneration.knowledge) return false;
+    _i2streamState.knowledgeFiles = [];
+    _i2streamState.loaded.knowledge = false;
+    _i2RenderFailure('i2streamKnowledgeList', 'i2streamKnowledgeStatus', error);
+    return false;
+  }
+}
+
+async function selectI2StreamKnowledgeCollection(collectionName) {
+  if (_i2KnowledgeOperationLocked()) return false;
+  const selected = _i2ContractString(collectionName, 'selected knowledge collection');
+  if (!_i2streamState.knowledgeCollections.some(collection => collection.name === selected)) {
+    throw new TypeError('selected knowledge collection is unavailable');
+  }
+  _i2streamState.selectedKnowledgeCollection = selected;
+  _i2streamState.knowledgeFiles = [];
+  _i2streamState.selectedKnowledgeFileIds = new Set();
+  _i2RenderKnowledge();
+  return _i2LoadSelectedKnowledgeFiles(selected);
+}
+
+async function createI2StreamKnowledgeCollection(event) {
+  event.preventDefault();
+  if (_i2streamState.knowledgeConfiguration?.configured !== true || _i2KnowledgeOperationLocked()) return;
+  const nameInput = document.getElementById('i2streamKnowledgeCollectionName');
+  if (!nameInput) return;
+  _i2streamState.knowledgeCollectionBusy = true;
+  _i2RenderKnowledgeSelectionControls();
+  _i2SetStatus('i2streamKnowledgeStatus', _i2Text('i2stream_knowledge_collection_creating'));
+  try {
+    const created = await createKnowledgeCollectionRequest(nameInput.value);
+    _i2streamState.selectedKnowledgeCollection = created.name;
+    nameInput.value = '';
+    const loaded = await loadI2StreamKnowledge();
+    if (loaded) {
+      _i2SetStatus('i2streamKnowledgeStatus', _i2Text('i2stream_knowledge_collection_created', created.name));
+    }
+  } catch (error) {
+    _i2SetStatus('i2streamKnowledgeStatus', `${_i2Text('error_prefix')}${error.message}`, 'error');
+  } finally {
+    _i2streamState.knowledgeCollectionBusy = false;
+    _i2RenderKnowledgeSelectionControls();
   }
 }
 
@@ -1088,19 +1598,26 @@ function _i2RenderKnowledgeSelectionControls() {
   const selectAll = document.getElementById('i2streamKnowledgeSelectAll');
   const count = document.getElementById('i2streamKnowledgeSelectionCount');
   const deleteSelected = document.getElementById('i2streamKnowledgeDeleteSelected');
-  if (actions) actions.hidden = files.length === 0;
+  const configured = _i2streamState.knowledgeConfiguration?.configured === true;
+  const locked = !configured || !_i2streamState.selectedKnowledgeCollection || _i2KnowledgeOperationLocked();
+  const uploadFile = document.getElementById('i2streamKnowledgeFile');
+  const uploadButton = document.getElementById('i2streamKnowledgeUploadBtn');
+  if (uploadFile) uploadFile.disabled = locked;
+  if (uploadButton) uploadButton.disabled = locked;
+  if (actions) actions.hidden = !configured || files.length === 0;
   if (selectAll) {
     selectAll.checked = files.length > 0 && selectedCount === files.length;
     selectAll.indeterminate = selectedCount > 0 && selectedCount < files.length;
-    selectAll.disabled = files.length === 0 || _i2streamState.knowledgeDeleteInFlight;
+    selectAll.disabled = files.length === 0 || locked;
   }
   if (count) count.textContent = _i2Text('i2stream_selected_count', selectedCount, files.length);
   if (deleteSelected) {
-    deleteSelected.disabled = selectedCount === 0 || _i2streamState.knowledgeDeleteInFlight;
+    deleteSelected.disabled = selectedCount === 0 || locked;
   }
   document.querySelectorAll('[data-i2stream-knowledge-control]').forEach(control => {
-    control.disabled = _i2streamState.knowledgeDeleteInFlight;
+    control.disabled = locked;
   });
+  _i2RenderKnowledgeCollectionControls();
 }
 
 function _i2RenderKnowledge() {
@@ -1131,7 +1648,7 @@ function _i2RenderKnowledge() {
 }
 
 function toggleI2StreamKnowledgeAll(selected) {
-  if (_i2streamState.knowledgeDeleteInFlight || !_i2streamState.loaded.knowledge) return;
+  if (_i2KnowledgeOperationLocked() || !_i2streamState.loaded.knowledge) return;
   _i2streamState.selectedKnowledgeFileIds = selected
     ? new Set(_i2streamState.knowledgeFiles.map(file => file.fileId))
     : new Set();
@@ -1140,21 +1657,27 @@ function toggleI2StreamKnowledgeAll(selected) {
 
 async function uploadI2StreamKnowledge(event) {
   event.preventDefault();
+  if (_i2streamState.knowledgeConfiguration?.configured !== true) {
+    _i2SetStatus('i2streamKnowledgeStatus', _i2Text('i2stream_knowledge_unconfigured'), 'error');
+    return;
+  }
   const input = document.getElementById('i2streamKnowledgeFile');
-  const button = document.getElementById('i2streamKnowledgeUploadBtn');
   let generation = null;
   try {
     if (!input || input.files.length !== 1) throw new TypeError('Select exactly one knowledge file');
     if (input.files[0].size > MAX_UPLOAD_BYTES) throw new Error(_uploadTooLargeMessage(input.files[0]));
+    const collectionName = _i2SelectedKnowledgeCollection();
     generation = ++_i2streamState.knowledgeTaskGeneration;
-    if (button) button.disabled = true;
+    _i2streamState.knowledgeUploadInFlight = true;
+    _i2RenderKnowledgeSelectionControls();
     _i2SetStatus('i2streamKnowledgeStatus', _i2Text('uploading'));
     const form = new FormData();
     form.append('file', input.files[0], input.files[0].name);
+    form.append('collection_name', collectionName);
     const payload = _i2Success(await api(`${I2STREAM_API}/knowledge/files`, {method:'POST', headers:{}, body:form, retries:0}), 'knowledge upload');
     const file = _i2ContractObject(payload.file, 'knowledge upload file');
     const taskId = _i2ContractString(file.task_id, 'knowledge upload task_id');
-    await _i2WaitForKnowledgeTask(taskId, generation);
+    await _i2WaitForKnowledgeTask(taskId, generation, collectionName);
     if (generation !== _i2streamState.knowledgeTaskGeneration) return;
     input.value = '';
     const label = document.getElementById('i2streamKnowledgeFileLabel');
@@ -1163,14 +1686,19 @@ async function uploadI2StreamKnowledge(event) {
   } catch (error) {
     _i2SetStatus('i2streamKnowledgeStatus', `${_i2Text('upload_failed')}${error.message}`, 'error');
   } finally {
-    if (button) button.disabled = false;
+    _i2streamState.knowledgeUploadInFlight = false;
+    _i2RenderKnowledgeSelectionControls();
   }
 }
 
-async function _i2WaitForKnowledgeTask(taskId, generation) {
+async function _i2WaitForKnowledgeTask(taskId, generation, collectionName) {
+  const capturedCollectionName = _i2ContractString(collectionName, 'knowledge task collection');
   for (let attempt = 0; attempt < 120; attempt += 1) {
     if (generation !== _i2streamState.knowledgeTaskGeneration) return;
-    const payload = _i2Success(await api(`${I2STREAM_API}/knowledge/tasks/${encodeURIComponent(taskId)}`), 'knowledge task');
+    const payload = _i2Success(await api(knowledgeCollectionUrl(
+      `/knowledge/tasks/${encodeURIComponent(taskId)}`,
+      capturedCollectionName,
+    )), 'knowledge task');
     const task = _i2ContractObject(payload.task, 'knowledge task payload');
     _i2ContractString(task.status, 'knowledge task status');
     if (typeof task.terminal !== 'boolean') throw new TypeError('knowledge task terminal must be a boolean');
@@ -1185,12 +1713,14 @@ async function _i2WaitForKnowledgeTask(taskId, generation) {
 }
 
 async function deleteI2StreamKnowledge(fileId, displayName) {
+  if (_i2streamState.knowledgeConfiguration?.configured !== true) return;
+  const collectionName = _i2SelectedKnowledgeCollection();
   const confirmed = await showConfirmDialog({title:`${_i2Text('delete_title')} ${displayName}?`,message:'',confirmLabel:_i2Text('delete_title'),danger:true,focusCancel:true});
   if (!confirmed) return;
   _i2streamState.knowledgeDeleteInFlight = true;
   _i2RenderKnowledgeSelectionControls();
   try {
-    const deletion = await _i2DeleteKnowledgeFiles([{fileId, displayName}]);
+    const deletion = await _i2DeleteKnowledgeFiles([{fileId, displayName}], collectionName);
     if (deletion.failures.length) throw new Error(deletion.failures[0].message);
     _i2streamState.selectedKnowledgeFileIds.delete(fileId);
     await loadI2StreamKnowledge();
@@ -1203,6 +1733,8 @@ async function deleteI2StreamKnowledge(fileId, displayName) {
 }
 
 async function deleteSelectedI2StreamKnowledge() {
+  if (_i2streamState.knowledgeConfiguration?.configured !== true) return;
+  const collectionName = _i2SelectedKnowledgeCollection();
   const selectedFiles = _i2streamState.knowledgeFiles.filter(file =>
     _i2streamState.selectedKnowledgeFileIds.has(file.fileId));
   if (!selectedFiles.length) {
@@ -1224,7 +1756,7 @@ async function deleteSelectedI2StreamKnowledge() {
     _i2Text('i2stream_deleting_selected', selectedFiles.length),
   );
   try {
-    const deletion = await _i2DeleteKnowledgeFiles(selectedFiles);
+    const deletion = await _i2DeleteKnowledgeFiles(selectedFiles, collectionName);
     deletion.deletedFileIds.forEach(fileId => _i2streamState.selectedKnowledgeFileIds.delete(fileId));
     const refreshed = await loadI2StreamKnowledge();
     if (!refreshed) return;
@@ -1473,6 +2005,15 @@ window.__i2streamConsoleTest = {
   parseConversationPage,
   parseConversationDetail,
   parseKnowledgeFiles,
+  parseKnowledgeCollections,
+  chooseKnowledgeCollection,
+  knowledgeCollectionUrl,
+  createKnowledgeCollectionRequest,
+  parseKnowledgeConfiguration,
+  parseKnowledgeConnectionCheck,
+  parseKnowledgeMcpSync,
+  normalizeKnowledgeConfiguration,
+  saveKnowledgeConfigurationRequest,
   reconcileKnowledgeSelection,
   deleteKnowledgeFiles: _i2DeleteKnowledgeFiles,
   parseReports,
@@ -1482,6 +2023,8 @@ window.__i2streamConsoleTest = {
   parseLogmonitorPreflight,
   parseLogmonitorInstallation,
   normalizeLogmonitorPayload,
+  readLogmonitorPrivateKey,
+  clearLogmonitorCredentials: _i2ClearLogmonitorCredentials,
   redactLogmonitorText,
   deleteNodeRequest,
   deleteI2StreamNode,
@@ -1489,6 +2032,7 @@ window.__i2streamConsoleTest = {
   loadOnlineNodes,
   getOnlineNodesState: _onlineNodesStateForTest,
   loadI2StreamHistory,
+  loadI2StreamKnowledge,
   resolveI2StreamBrowserUrl,
 };
 

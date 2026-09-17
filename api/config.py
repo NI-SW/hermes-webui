@@ -802,16 +802,12 @@ def _config_for_yaml_save(config_data: dict) -> dict:
     return data
 
 
-def _save_yaml_config_file(config_path: Path, config_data: dict) -> None:
-    try:
-        import yaml as _yaml
-    except ImportError as exc:
-        raise RuntimeError("PyYAML is required to write Hermes config.yaml") from exc
-
+def _write_yaml_config_text(config_path: Path, text: str) -> None:
+    """Write YAML text atomically and invalidate the parsed-file cache."""
     config_path.parent.mkdir(parents=True, exist_ok=True)
     _paths._atomic_write_text(
         config_path,
-        _yaml.safe_dump(_config_for_yaml_save(config_data), sort_keys=False, allow_unicode=True),
+        text,
         encoding="utf-8",
     )
     # Invalidate the memoized parse for this path so the next read re-parses the
@@ -820,6 +816,22 @@ def _save_yaml_config_file(config_path: Path, config_data: dict) -> None:
     # serve a stale dict (#4650 review) — evicting on our own write closes that gap.
     with _yaml_file_cache_lock:
         _yaml_file_cache.pop(str(config_path), None)
+
+
+def _save_yaml_config_file(config_path: Path, config_data: dict) -> None:
+    try:
+        import yaml as _yaml
+    except ImportError as exc:
+        raise RuntimeError("PyYAML is required to write Hermes config.yaml") from exc
+
+    _write_yaml_config_text(
+        config_path,
+        _yaml.safe_dump(
+            _config_for_yaml_save(config_data),
+            sort_keys=False,
+            allow_unicode=True,
+        ),
+    )
 
 
 # Initial load
