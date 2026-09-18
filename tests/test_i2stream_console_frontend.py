@@ -79,6 +79,10 @@ def test_i2stream_has_desktop_mobile_sidebar_and_main_surfaces():
 
 
 def test_knowledge_view_exposes_batch_selection_controls():
+    assert re.search(
+        r'id="i2streamKnowledgeFile"[^>]*\bmultiple\b',
+        INDEX,
+    )
     assert 'id="i2streamKnowledgeBatchActions"' in INDEX
     assert 'id="i2streamKnowledgeSelectAll"' in INDEX
     assert 'onchange="toggleI2StreamKnowledgeAll(this.checked)"' in INDEX
@@ -880,7 +884,10 @@ output = {loaded, calls, selected: controls.i2streamKnowledgeCollectionSelect.va
 def test_upload_polling_and_delete_keep_the_selected_collection():
     result = _run_contract_case(
         """
-const file = {name: 'guide.md', size: 12};
+const files = [
+  {name: 'guide.md', size: 12},
+  {name: 'manual.pdf', size: 24},
+];
 const controls = {
   i2streamKnowledgeConfigStatus: {textContent: '', dataset: {}},
   i2streamKnowledgeStatus: {textContent: '', dataset: {}},
@@ -893,7 +900,7 @@ const controls = {
   i2streamKnowledgeCollectionSelect: {disabled: false, innerHTML: '', value: ''},
   i2streamKnowledgeCollectionName: {disabled: false, value: ''},
   i2streamKnowledgeCollectionCreateBtn: {disabled: false},
-  i2streamKnowledgeFile: {disabled: false, files: [file], value: 'guide.md'},
+  i2streamKnowledgeFile: {disabled: false, files, value: 'selected-files'},
   i2streamKnowledgeFileLabel: {textContent: ''},
   i2streamKnowledgeUploadBtn: {disabled: false},
   i2streamKnowledgeBatchActions: {hidden: false},
@@ -913,6 +920,7 @@ sandbox.FormData = class {
 sandbox.showConfirmDialog = async () => true;
 const operationCalls = [];
 let switchWhileUploading;
+let uploadCount = 0;
 sandbox.api = async (url, options = {}) => {
   if (url.endsWith('/knowledge/config')) return {
     code: 0, status: 'success', configuration: {
@@ -927,9 +935,10 @@ sandbox.api = async (url, options = {}) => {
     ]
   };
   if (options.method === 'POST') {
+    uploadCount += 1;
     operationCalls.push({url, method: options.method, form: options.body.values});
     switchWhileUploading = await sandbox.selectI2StreamKnowledgeCollection('archive');
-    return {code: 0, status: 'success', file: {task_id: 'task-1'}};
+    return {code: 0, status: 'success', file: {task_id: `task-${uploadCount}`}};
   }
   if (url.includes('/knowledge/tasks/')) {
     operationCalls.push({url, method: 'GET'});
@@ -947,6 +956,8 @@ await sandbox.deleteI2StreamKnowledge('file/a', 'Guide');
 output = {
   operationCalls,
   switchWhileUploading,
+  inputValue: controls.i2streamKnowledgeFile.value,
+  inputLabel: controls.i2streamKnowledgeFileLabel.textContent,
 };
 """
     )
@@ -962,11 +973,160 @@ output = {
                 "method": "GET",
             },
             {
+                "url": "/api/i2stream-console/knowledge/files",
+                "method": "POST",
+                "form": [["file", "manual.pdf"], ["collection_name", "documents"]],
+            },
+            {
+                "url": "/api/i2stream-console/knowledge/tasks/task-2?collection_name=documents",
+                "method": "GET",
+            },
+            {
                 "url": "/api/i2stream-console/knowledge/files/file%2Fa?collection_name=documents",
                 "method": "DELETE",
             },
         ],
         "switchWhileUploading": False,
+        "inputValue": "",
+        "inputLabel": "i2stream_choose_file",
+    }
+
+
+def test_multi_file_upload_continues_after_one_file_fails_and_reports_summary():
+    result = _run_contract_case(
+        """
+const files = [
+  {name: 'broken.md', size: 12},
+  {name: 'guide.pdf', size: 24},
+];
+const controls = {
+  i2streamKnowledgeConfigStatus: {textContent: '', dataset: {}},
+  i2streamKnowledgeStatus: {textContent: '', dataset: {}},
+  i2streamKnowledgeVectorHost: {value: ''},
+  i2streamKnowledgeRagMcpUrl: {value: ''},
+  i2streamKnowledgeConfigState: {className: '', textContent: '', dataset: {}},
+  i2streamKnowledgeUnconfigured: {hidden: true},
+  i2streamKnowledgeConfig: {querySelectorAll: () => []},
+  i2streamKnowledgeCollections: {hidden: true},
+  i2streamKnowledgeCollectionSelect: {disabled: false, innerHTML: '', value: ''},
+  i2streamKnowledgeCollectionName: {disabled: false, value: ''},
+  i2streamKnowledgeCollectionCreateBtn: {disabled: false},
+  i2streamKnowledgeFile: {disabled: false, files, value: 'selected-files'},
+  i2streamKnowledgeFileLabel: {textContent: ''},
+  i2streamKnowledgeUploadBtn: {disabled: false},
+  i2streamKnowledgeBatchActions: {hidden: false},
+  i2streamKnowledgeSelectAll: {checked: false, indeterminate: false, disabled: false},
+  i2streamKnowledgeSelectionCount: {textContent: ''},
+  i2streamKnowledgeDeleteSelected: {disabled: false},
+  i2streamKnowledgeList: {innerHTML: ''}
+};
+document.getElementById = id => controls[id] || null;
+sandbox.MAX_UPLOAD_BYTES = 1024;
+sandbox.FormData = class {
+  constructor() { this.values = []; }
+  append(name, value) {
+    this.values.push([name, value && value.name ? value.name : value]);
+  }
+};
+sandbox.t = key => ({
+  uploading: 'Uploading', uploaded: 'Uploaded', upload_failed: 'Upload failed: ',
+  i2stream_choose_file: 'Choose files'
+})[key] || key;
+const calls = [];
+let listLoads = 0;
+sandbox.api = async (url, options = {}) => {
+  if (url.endsWith('/knowledge/config')) return {
+    code: 0, status: 'success', configuration: {
+      configured: true, vector_search_host: 'http://rag.test:8900',
+      rag_service_mcp_url: 'http://rag.test:8900/mcp', updated_at: '2026-09-16T10:00:00Z'
+    }
+  };
+  if (url.endsWith('/knowledge/collections')) return {
+    code: 0, status: 'success', total: 1, collections: [
+      {name: 'documents', points_count: 2, vectors_count: 2, status: 'green', schema: 'v1', is_default: true}
+    ]
+  };
+  if (options.method === 'POST') {
+    calls.push(options.body.values);
+    if (options.body.values[0][1] === 'broken.md') throw new Error('index rejected');
+    return {code: 0, status: 'success', file: {task_id: 'task-guide'}};
+  }
+  if (url.includes('/knowledge/tasks/')) {
+    return {code: 0, status: 'success', task: {status: 'completed', terminal: true}};
+  }
+  if (url.includes('/knowledge/files?')) listLoads += 1;
+  return {code: 0, status: 'success', files: []};
+};
+await c.loadI2StreamKnowledge();
+listLoads = 0;
+await sandbox.uploadI2StreamKnowledge({preventDefault() {}});
+output = {
+  calls,
+  listLoads,
+  status: controls.i2streamKnowledgeStatus.textContent,
+  statusState: controls.i2streamKnowledgeStatus.dataset.kind,
+  inputValue: controls.i2streamKnowledgeFile.value,
+};
+"""
+    )
+    assert result == {
+        "calls": [
+            [["file", "broken.md"], ["collection_name", "documents"]],
+            [["file", "guide.pdf"], ["collection_name", "documents"]],
+        ],
+        "listLoads": 1,
+        "status": "Uploaded 1/2; Upload failed: broken.md: index rejected",
+        "statusState": "error",
+        "inputValue": "",
+    }
+
+
+def test_multi_file_upload_rejects_oversized_batch_before_first_request():
+    result = _run_contract_case(
+        """
+const controls = {
+  i2streamKnowledgeStatus: {textContent: '', dataset: {}},
+  i2streamKnowledgeFile: {
+    disabled: false,
+    files: [
+      {name: 'small.md', size: 12},
+      {name: 'large.pdf', size: 2048},
+    ],
+    value: 'selected-files'
+  }
+};
+document.getElementById = id => controls[id] || null;
+sandbox.MAX_UPLOAD_BYTES = 1024;
+sandbox._uploadTooLargeMessage = file => `${file.name} exceeds the upload limit.`;
+let calls = 0;
+sandbox.api = async (url, options = {}) => {
+  if (url.endsWith('/knowledge/config')) return {
+    code: 0, status: 'success', configuration: {
+      configured: true, vector_search_host: 'http://rag.test:8900',
+      rag_service_mcp_url: 'http://rag.test:8900/mcp', updated_at: '2026-09-16T10:00:00Z'
+    }
+  };
+  if (url.endsWith('/knowledge/collections')) return {
+    code: 0, status: 'success', total: 1, collections: [
+      {name: 'documents', points_count: 0, vectors_count: 0, status: 'green', schema: 'v1', is_default: true}
+    ]
+  };
+  if (options.method === 'POST') calls += 1;
+  return {code: 0, status: 'success', files: []};
+};
+await c.loadI2StreamKnowledge();
+await sandbox.uploadI2StreamKnowledge({preventDefault() {}});
+output = {
+  calls,
+  status: controls.i2streamKnowledgeStatus.textContent,
+  inputValue: controls.i2streamKnowledgeFile.value,
+};
+"""
+    )
+    assert result == {
+        "calls": 0,
+        "status": "upload_failedlarge.pdf exceeds the upload limit.",
+        "inputValue": "selected-files",
     }
 
 
@@ -1022,7 +1182,7 @@ def test_i2stream_module_uses_only_same_origin_console_api_contract():
     assert "FormData" in source
     assert "method: 'DELETE'" in source
     assert "client_id:" in source
-    assert "input.files[0].size > MAX_UPLOAD_BYTES" in source
+    assert "files.some(file => file.size > MAX_UPLOAD_BYTES)" in source
     assert "requestGeneration: {knowledge: 0, reports: 0, history: 0, nodes: 0}" in source
     assert "historyDetailGeneration" in source
     assert source.count("generation !== _i2streamState.historyDetailGeneration") == 2

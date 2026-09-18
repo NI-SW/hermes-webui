@@ -1072,7 +1072,10 @@ function _i2EnsureBindings() {
   if (fileInput) {
     fileInput.addEventListener('change', () => {
       const label = document.getElementById('i2streamKnowledgeFileLabel');
-      if (label) label.textContent = fileInput.files.length === 1 ? fileInput.files[0].name : _i2Text('i2stream_choose_file');
+      if (!label) return;
+      if (fileInput.files.length === 0) label.textContent = _i2Text('i2stream_choose_file');
+      else if (fileInput.files.length === 1) label.textContent = fileInput.files[0].name;
+      else label.textContent = _i2Text('i2stream_selected_count', fileInput.files.length, fileInput.files.length);
     });
   }
   const history = document.getElementById('i2streamHistoryList');
@@ -1661,28 +1664,62 @@ async function uploadI2StreamKnowledge(event) {
     _i2SetStatus('i2streamKnowledgeStatus', _i2Text('i2stream_knowledge_unconfigured'), 'error');
     return;
   }
+  if (_i2KnowledgeOperationLocked()) return;
   const input = document.getElementById('i2streamKnowledgeFile');
   let generation = null;
   try {
-    if (!input || input.files.length !== 1) throw new TypeError('Select exactly one knowledge file');
-    if (input.files[0].size > MAX_UPLOAD_BYTES) throw new Error(_uploadTooLargeMessage(input.files[0]));
+    const files = input ? Array.from(input.files) : [];
+    if (!files.length) throw new TypeError('Select at least one knowledge file');
+    if (files.some(file => file.size > MAX_UPLOAD_BYTES)) {
+      const oversizedFile = files.find(file => file.size > MAX_UPLOAD_BYTES);
+      throw new Error(_uploadTooLargeMessage(oversizedFile));
+    }
     const collectionName = _i2SelectedKnowledgeCollection();
     generation = ++_i2streamState.knowledgeTaskGeneration;
     _i2streamState.knowledgeUploadInFlight = true;
     _i2RenderKnowledgeSelectionControls();
-    _i2SetStatus('i2streamKnowledgeStatus', _i2Text('uploading'));
-    const form = new FormData();
-    form.append('file', input.files[0], input.files[0].name);
-    form.append('collection_name', collectionName);
-    const payload = _i2Success(await api(`${I2STREAM_API}/knowledge/files`, {method:'POST', headers:{}, body:form, retries:0}), 'knowledge upload');
-    const file = _i2ContractObject(payload.file, 'knowledge upload file');
-    const taskId = _i2ContractString(file.task_id, 'knowledge upload task_id');
-    await _i2WaitForKnowledgeTask(taskId, generation, collectionName);
+    const failures = [];
+    let uploadedCount = 0;
+    for (const [index, selectedFile] of files.entries()) {
+      _i2SetStatus(
+        'i2streamKnowledgeStatus',
+        `${_i2Text('uploading')} ${index + 1}/${files.length}: ${selectedFile.name}`,
+      );
+      try {
+        const form = new FormData();
+        form.append('file', selectedFile, selectedFile.name);
+        form.append('collection_name', collectionName);
+        const payload = _i2Success(await api(`${I2STREAM_API}/knowledge/files`, {method:'POST', headers:{}, body:form, retries:0}), 'knowledge upload');
+        const uploadedFile = _i2ContractObject(payload.file, 'knowledge upload file');
+        const taskId = _i2ContractString(uploadedFile.task_id, 'knowledge upload task_id');
+        await _i2WaitForKnowledgeTask(taskId, generation, collectionName);
+        if (generation !== _i2streamState.knowledgeTaskGeneration) return;
+        uploadedCount += 1;
+      } catch (error) {
+        failures.push({
+          name: selectedFile.name,
+          message: error && typeof error.message === 'string' ? error.message : String(error),
+        });
+      }
+    }
     if (generation !== _i2streamState.knowledgeTaskGeneration) return;
-    input.value = '';
-    const label = document.getElementById('i2streamKnowledgeFileLabel');
-    if (label) label.textContent = _i2Text('i2stream_choose_file');
-    await loadI2StreamKnowledge();
+    if (uploadedCount > 0) {
+      input.value = '';
+      const label = document.getElementById('i2streamKnowledgeFileLabel');
+      if (label) label.textContent = _i2Text('i2stream_choose_file');
+      const refreshed = await loadI2StreamKnowledge();
+      if (!refreshed) return;
+    }
+    if (failures.length) {
+      const details = failures.map(failure => `${failure.name}: ${failure.message}`).join(', ');
+      _i2SetStatus(
+        'i2streamKnowledgeStatus',
+        `${_i2Text('uploaded')} ${uploadedCount}/${files.length}; ${_i2Text('upload_failed')}${details}`,
+        'error',
+      );
+    } else {
+      _i2SetStatus('i2streamKnowledgeStatus', `${_i2Text('uploaded')} ${uploadedCount}/${files.length}`);
+    }
   } catch (error) {
     _i2SetStatus('i2streamKnowledgeStatus', `${_i2Text('upload_failed')}${error.message}`, 'error');
   } finally {
