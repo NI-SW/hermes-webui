@@ -44,6 +44,9 @@ _HASH_CHUNK_BYTES = 1024 * 1024
 _MAX_RETAINED_JOBS = 200
 _MAX_RETAINED_PREFLIGHTS = 1000
 _PREFLIGHT_TIMEOUT_SECONDS = 60
+_AGENT_MCP_TIMEOUT_SECONDS = 480
+_AGENT_PYTHON_PATH = Path("/opt/hermes/.venv/bin/python")
+_HERMES_WEBUI_PATH = Path("/app/hermes-webui")
 logger = logging.getLogger(__name__)
 
 
@@ -51,6 +54,68 @@ class InstallerError(RuntimeError):
     def __init__(self, message: str, status_code: int):
         super().__init__(message)
         self.status_code = status_code
+
+
+class MCPRegistrationError(RuntimeError):
+    pass
+
+
+class AgentMCPRegistrar:
+    def __init__(
+        self,
+        *,
+        python_path: Path = _AGENT_PYTHON_PATH,
+        webui_path: Path = _HERMES_WEBUI_PATH,
+        timeout_seconds: int = _AGENT_MCP_TIMEOUT_SECONDS,
+    ):
+        self.python_path = python_path
+        self.webui_path = webui_path
+        self.timeout_seconds = timeout_seconds
+
+    @staticmethod
+    def _failure_detail(stderr: bytes) -> str:
+        try:
+            payload = json.loads(stderr.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return "未返回结构化错误"
+        if not isinstance(payload, dict):
+            return "未返回结构化错误"
+        detail = payload.get("error")
+        if not isinstance(detail, str) or not detail or len(detail) > 512:
+            return "未返回结构化错误"
+        if any(ord(character) < 32 or ord(character) == 127 for character in detail):
+            return "未返回结构化错误"
+        return detail
+
+    def register(self, target_ip: str) -> None:
+        argv = [
+            str(self.python_path),
+            "-m",
+            "api.i2stream_node_mcp",
+            "configure",
+            target_ip,
+        ]
+        try:
+            result = subprocess.run(
+                argv,
+                cwd=str(self.webui_path),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=self.timeout_seconds,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise MCPRegistrationError("Agent MCP 配置命令执行失败") from exc
+        if result.returncode != 0:
+            detail = self._failure_detail(result.stderr)
+            logger.warning(
+                "Agent MCP registration failed for target %s: %s",
+                target_ip,
+                detail,
+            )
+            raise MCPRegistrationError(
+                f"Agent MCP 配置或 Gateway 重启失败：{detail}"
+            )
 
 
 @dataclass(frozen=True)
@@ -415,9 +480,11 @@ class LogMonitorInstaller:
         config: InstallerConfig,
         *,
         ssh_client: SSHClient | None = None,
+        mcp_registrar: AgentMCPRegistrar | None = None,
     ):
         self.config = config
         self.ssh = ssh_client or SSHClient(config.known_hosts_path)
+        self.mcp_registrar = mcp_registrar or AgentMCPRegistrar()
         self._lock = threading.Lock()
         self._preflights: dict[str, _PreflightRecord] = {}
         self._jobs: dict[str, dict[str, object]] = {}
@@ -762,6 +829,7 @@ class LogMonitorInstaller:
     def _run_installation(self, job_id: str, payload: LogMonitorInstallRequest, callback_host: str) -> None:
         remote_dir: str | None = None
         container_start_attempted = False
+        remote_install_verified = False
         try:
             self._require_local_artifacts()
             self._update_job(job_id, "preflight", "正在重新检查目标机器")
@@ -829,6 +897,7 @@ class LogMonitorInstaller:
                 "then exit 0; fi; sleep 2; done; exit 1\n"
             )
             self._run_required(payload, process_check, timeout=40)
+            remote_install_verified = True
             with self._lock:
                 job_checks = [dict(check) for check in self._jobs[job_id]["checks"]]
             job_checks.append(
@@ -839,20 +908,50 @@ class LogMonitorInstaller:
                 }
             )
             self._update_job(job_id, "verifying_logmonitor", "LogMonitor 进程已启动", checks=job_checks)
-            self._finish_job(job_id, "completed", "LogMonitor 安装完成")
+            self._update_job(
+                job_id,
+                "configuring_mcp",
+                "正在验证并配置节点 MCP，随后重启 Gateway",
+                checks=job_checks,
+            )
+            self.mcp_registrar.register(payload.target_ip)
+            job_checks.append(
+                {
+                    "name": "node_mcp",
+                    "status": "passed",
+                    "message": "节点 MCP 已注册并重新加载",
+                }
+            )
+            self._update_job(
+                job_id,
+                "restarting_gateway",
+                "节点 MCP 已配置，Gateway 已重新加载",
+                checks=job_checks,
+            )
+            self._finish_job(
+                job_id,
+                "completed",
+                "LogMonitor 安装完成，节点 MCP 已配置",
+            )
+        except MCPRegistrationError:
+            self._finish_job(
+                job_id,
+                "failed",
+                "LogMonitor 已安装，但 Agent MCP 配置失败；目标容器已保留",
+            )
         except InstallerError as exc:
             self._finish_failed_installation(
                 job_id,
                 payload,
                 str(exc),
-                container_start_attempted,
+                container_start_attempted and not remote_install_verified,
             )
         except (OSError, subprocess.TimeoutExpired):
             self._finish_failed_installation(
                 job_id,
                 payload,
                 "远程安装执行失败",
-                container_start_attempted,
+                container_start_attempted and not remote_install_verified,
             )
         except Exception:
             logger.error("LogMonitor installation failed unexpectedly for job %s", job_id)
@@ -860,7 +959,7 @@ class LogMonitorInstaller:
                 job_id,
                 payload,
                 "远程安装执行失败",
-                container_start_attempted,
+                container_start_attempted and not remote_install_verified,
             )
         finally:
             if remote_dir is not None:

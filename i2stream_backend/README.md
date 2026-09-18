@@ -138,8 +138,24 @@ Requires the same internal Bearer token and a matching, unexpired `preflight_id`
 It returns HTTP 202 and an in-memory `job_id`. The installer re-runs preflight,
 uploads the fixed image, startup script and generated `node.env` using SCP, verifies
 the image SHA256 on the target, starts the container, and checks both container and
-LogMonitor process state. Only one active job is allowed per target IPv4. An existing
-`mcp-server` is not replaced.
+LogMonitor process state. It then probes `http://<target IPv4>:8643/mcp`, writes the
+node as `i2up-stream-mcp-<third octet>-<fourth octet>` in the default Hermes profile,
+and restarts the supervised default Gateway. The job is completed only after the MCP
+publishes at least one tool and the replacement Gateway is healthy. Only one active
+job is allowed per target IPv4. An existing `mcp-server` is not replaced.
+
+Node MCP and RAG MCP updates share a cross-process transaction lock, so concurrent
+configuration changes cannot overwrite each other or interleave their Gateway
+restarts. Invalid existing `config.yaml` content stops registration without replacing
+the file. If MCP registration or Gateway restart fails after the remote process was
+verified, the job is marked failed with a partial-install message and the managed
+target container is retained. After correcting the configuration or Gateway problem,
+an operator can retry registration inside the Agent container with:
+
+```bash
+cd /app/hermes-webui
+/opt/hermes/.venv/bin/python -m api.i2stream_node_mcp configure <target IPv4>
+```
 
 When both credentials are provided, one SSH/SCP process offers the private key first
 and the password second. This avoids repeating a remote command when that command

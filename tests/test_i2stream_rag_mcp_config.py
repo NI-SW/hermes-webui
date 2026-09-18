@@ -3,6 +3,7 @@ from unittest.mock import MagicMock
 from urllib.parse import urlparse
 
 import json
+from contextlib import contextmanager
 import threading
 import time
 
@@ -275,6 +276,12 @@ def test_apply_rag_mcp_configuration_serializes_configure_restart_and_reset(
     events = []
     errors = []
 
+    @contextmanager
+    def transaction_lock():
+        events.append(("lock_enter",))
+        yield
+        events.append(("lock_exit",))
+
     def configure(url):
         events.append(("configure", url))
         return {
@@ -292,6 +299,11 @@ def test_apply_rag_mcp_configuration_serializes_configure_restart_and_reset(
         return {"status": "completed", "profiles": []}
 
     monkeypatch.setattr(i2stream_rag_mcp, "configure_rag_mcp_profiles", configure)
+    monkeypatch.setattr(
+        i2stream_rag_mcp,
+        "mcp_config_transaction_lock",
+        transaction_lock,
+    )
     monkeypatch.setattr(i2stream_rag_mcp, "restart_managed_gateways", restart)
     monkeypatch.setattr(
         i2stream_rag_mcp,
@@ -313,6 +325,7 @@ def test_apply_rag_mcp_configuration_serializes_configure_restart_and_reset(
     time.sleep(0.05)
 
     assert events == [
+        ("lock_enter",),
         ("configure", "http://rag-a:8900/mcp"),
         ("restart", ("default",)),
     ]
@@ -325,12 +338,16 @@ def test_apply_rag_mcp_configuration_serializes_configure_restart_and_reset(
     assert not second.is_alive()
     assert errors == []
     assert events == [
+        ("lock_enter",),
         ("configure", "http://rag-a:8900/mcp"),
         ("restart", ("default",)),
         ("reset",),
+        ("lock_exit",),
+        ("lock_enter",),
         ("configure", "http://rag-b:8900/mcp"),
         ("restart", ("default",)),
         ("reset",),
+        ("lock_exit",),
     ]
 
 

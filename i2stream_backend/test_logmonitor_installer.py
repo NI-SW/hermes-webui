@@ -25,10 +25,12 @@ os.environ.setdefault("GATEWAY_BRIDGE_TOKEN", "gateway-token-32-bytes-for-tests!
 import auth
 import main
 from logmonitor_installer import (
+    AgentMCPRegistrar,
     CHECK_NAMES,
     InstallerConfig,
     InstallerError,
     LogMonitorInstaller,
+    MCPRegistrationError,
     SSHClient,
 )
 from models import LogMonitorInstallRequest, LogMonitorPreflightRequest
@@ -132,6 +134,17 @@ class ImmediateThread:
         self.target(*self.args)
 
 
+class FakeMCPRegistrar:
+    def __init__(self, error: MCPRegistrationError | None = None):
+        self.error = error
+        self.targets: list[str] = []
+
+    def register(self, target_ip: str) -> None:
+        self.targets.append(target_ip)
+        if self.error is not None:
+            raise self.error
+
+
 class FakeRouteInstaller:
     def __init__(self):
         self.preflight_call = None
@@ -184,6 +197,7 @@ class LogMonitorInstallerTests(unittest.TestCase):
         self.script.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
         self.digest = hashlib.sha256(self.image_bytes).hexdigest()
         self.ssh = FakeSSH(self.digest)
+        self.mcp_registrar = FakeMCPRegistrar()
         self.installer = LogMonitorInstaller(
             InstallerConfig(
                 agent_public_host="",
@@ -196,6 +210,7 @@ class LogMonitorInstallerTests(unittest.TestCase):
                 preflight_ttl_seconds=300,
             ),
             ssh_client=self.ssh,
+            mcp_registrar=self.mcp_registrar,
         )
 
     def tearDown(self) -> None:
@@ -367,6 +382,16 @@ class LogMonitorInstallerTests(unittest.TestCase):
         job = self.installer.get_job(created["job_id"])
         self.assertEqual(job["status"], "completed")
         self.assertEqual(job["stage"], "completed")
+        self.assertEqual(job["message"], "LogMonitor 安装完成，节点 MCP 已配置")
+        self.assertEqual(self.mcp_registrar.targets, ["192.168.10.20"])
+        self.assertIn(
+            {
+                "name": "node_mcp",
+                "status": "passed",
+                "message": "节点 MCP 已注册并重新加载",
+            },
+            job["checks"],
+        )
         self.assertNotIn(PASSWORD, repr(preflight))
         self.assertNotIn(PASSWORD, repr(created))
         self.assertNotIn(PASSWORD, repr(job))
@@ -465,6 +490,94 @@ class LogMonitorInstallerTests(unittest.TestCase):
         cleanup = next(script for script in failing_ssh.scripts if "managed=$(docker inspect" in script)
         self.assertIn("com.info2soft.logmonitor.managed", cleanup)
         self.assertIn("docker rm -f mcp-server", cleanup)
+
+    def test_mcp_registration_failure_preserves_installed_container(self) -> None:
+        registrar = FakeMCPRegistrar(MCPRegistrationError("gateway unavailable"))
+        installer = LogMonitorInstaller(
+            self.installer.config,
+            ssh_client=self.ssh,
+            mcp_registrar=registrar,
+        )
+        preflight = installer.preflight(
+            LogMonitorPreflightRequest(**request_values()),
+            "192.168.1.10",
+        )
+        install_request = LogMonitorInstallRequest(
+            **request_values(),
+            preflight_id=preflight["preflight_id"],
+        )
+
+        with patch("logmonitor_installer.threading.Thread", ImmediateThread):
+            created = installer.create_installation(
+                install_request,
+                "192.168.1.10",
+            )
+
+        job = installer.get_job(created["job_id"])
+        self.assertEqual(job["status"], "failed")
+        self.assertEqual(
+            job["message"],
+            "LogMonitor 已安装，但 Agent MCP 配置失败；目标容器已保留",
+        )
+        self.assertEqual(registrar.targets, ["192.168.10.20"])
+        self.assertFalse(
+            any("managed=$(docker inspect" in script for script in self.ssh.scripts)
+        )
+
+    def test_agent_mcp_registrar_invokes_webui_command_without_shell(self) -> None:
+        python_path = Path(self.temp_dir.name) / "python"
+        webui_path = Path(self.temp_dir.name) / "webui"
+        webui_path.mkdir()
+        registrar = AgentMCPRegistrar(
+            python_path=python_path,
+            webui_path=webui_path,
+            timeout_seconds=45,
+        )
+
+        with patch(
+            "logmonitor_installer.subprocess.run",
+            return_value=subprocess.CompletedProcess([], 0, b'{}', b""),
+        ) as run:
+            registrar.register("192.168.10.20")
+
+        run.assert_called_once_with(
+            [
+                str(python_path),
+                "-m",
+                "api.i2stream_node_mcp",
+                "configure",
+                "192.168.10.20",
+            ],
+            cwd=str(webui_path),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=45,
+            check=False,
+        )
+
+    def test_agent_mcp_registrar_reports_command_failure(self) -> None:
+        registrar = AgentMCPRegistrar(
+            python_path=Path("/test/python"),
+            webui_path=Path("/test/webui"),
+        )
+        with patch(
+            "logmonitor_installer.subprocess.run",
+            return_value=subprocess.CompletedProcess(
+                [],
+                1,
+                b"",
+                json.dumps(
+                    {"status": "failed", "error": "节点 MCP 名称冲突"},
+                    ensure_ascii=False,
+                ).encode("utf-8"),
+            ),
+        ):
+            with self.assertLogs("logmonitor_installer", level="WARNING") as logs:
+                with self.assertRaises(MCPRegistrationError) as raised:
+                    registrar.register("192.168.10.20")
+
+        self.assertIn("节点 MCP 名称冲突", str(raised.exception))
+        self.assertIn("节点 MCP 名称冲突", "\n".join(logs.output))
 
     def test_scp_uses_uppercase_port_flag_and_password_only_in_environment(self) -> None:
         client = SSHClient(Path(self.temp_dir.name) / "ssh2" / "known_hosts")
