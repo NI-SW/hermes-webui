@@ -6,11 +6,11 @@ const I2STREAM_HISTORY_PAGE_SIZE = 30;
 const I2STREAM_NODES_POLL_INTERVAL_MS = 30_000;
 const I2STREAM_INSTALL_POLL_INTERVAL_MS = 2_000;
 const I2STREAM_PRIVATE_KEY_MAX_BYTES = 16 * 1024;
-const I2STREAM_SECTIONS = new Set(['knowledge', 'reports', 'history', 'nodes', 'logmonitor']);
+const I2STREAM_SECTIONS = new Set(['knowledge', 'datacop', 'reports', 'history', 'nodes', 'logmonitor']);
 const I2STREAM_CLIENT_ID_RE = /^[A-Za-z0-9_-]{16,128}$/;
 const _i2streamState = {
   section: 'knowledge',
-  loaded: {knowledge: false, reports: false, history: false, nodes: false, logmonitor: true},
+  loaded: {knowledge: false, datacop: false, reports: false, history: false, nodes: false, logmonitor: true},
   knowledgeFiles: [],
   knowledgeCollections: [],
   selectedKnowledgeCollection: null,
@@ -20,6 +20,8 @@ const _i2streamState = {
   knowledgeUploadInFlight: false,
   selectedKnowledgeFileIds: new Set(),
   knowledgeDeleteInFlight: false,
+  datacopConfiguration: null,
+  datacopConfigBusy: false,
   reports: [],
   conversations: [],
   historyClientId: null,
@@ -27,7 +29,7 @@ const _i2streamState = {
   selectedConversationKey: null,
   selectedReportToken: null,
   knowledgeTaskGeneration: 0,
-  requestGeneration: {knowledge: 0, reports: 0, history: 0, nodes: 0},
+  requestGeneration: {knowledge: 0, datacop: 0, reports: 0, history: 0, nodes: 0},
   historyDetailGeneration: 0,
   bindingsReady: false,
   nodes: [],
@@ -343,6 +345,109 @@ async function saveKnowledgeConfigurationRequest(payload) {
       : new Error(String(error));
     return {configuration, mcp: null, mcpSyncError};
   }
+}
+
+function parseDatacopConfiguration(value) {
+  const payload = _i2Success(value, 'DataCop MCP configuration');
+  const raw = _i2ContractObject(payload.mcp, 'DataCop MCP configuration payload');
+  if (typeof raw.configured !== 'boolean' || typeof raw.has_api_key !== 'boolean') {
+    throw new TypeError('DataCop MCP configured and has_api_key must be booleans');
+  }
+  const datacopMcpUrl = _i2ContractString(
+    raw.datacop_mcp_url,
+    'DataCop MCP URL',
+    !raw.configured,
+  );
+  return {
+    configured: raw.configured,
+    datacopMcpUrl,
+    hasApiKey: raw.has_api_key,
+    configuredProfiles: _i2KnowledgeProfileNames(
+      raw.configured_profiles,
+      'DataCop MCP configured_profiles',
+    ),
+    missingProfiles: _i2KnowledgeProfileNames(
+      raw.missing_profiles,
+      'DataCop MCP missing_profiles',
+    ),
+  };
+}
+
+function normalizeDatacopConfiguration(raw, allowEmptyApiKey = false) {
+  const values = _i2ContractObject(raw, 'DataCop MCP configuration form');
+  const datacopMcpUrl = _i2ContractString(
+    values.datacop_mcp_url,
+    'DataCop MCP URL',
+  );
+  const apiKey = _i2ContractString(values.api_key, 'DataCop API key', allowEmptyApiKey);
+  if (datacopMcpUrl !== datacopMcpUrl.trim() || /\s/.test(datacopMcpUrl)) {
+    throw new TypeError(_i2Text('i2stream_datacop_config_invalid'));
+  }
+  if ((!allowEmptyApiKey && !apiKey) || apiKey.length > 4096 ||
+      apiKey !== apiKey.trim() || /\s/.test(apiKey)) {
+    throw new TypeError(_i2Text('i2stream_datacop_config_invalid'));
+  }
+  return {datacop_mcp_url: datacopMcpUrl, api_key: apiKey};
+}
+
+function parseDatacopConnectionCheck(value) {
+  const payload = _i2Success(value, 'DataCop MCP connection check');
+  const mcp = _i2ContractObject(payload.mcp, 'DataCop MCP connection check payload');
+  const toolCount = _i2NonNegativeSafeInteger(mcp.tool_count, 'DataCop MCP tool_count');
+  if (toolCount === 0) throw new TypeError('DataCop MCP must publish at least one tool');
+  return {
+    datacopMcpUrl: _i2ContractString(mcp.datacop_mcp_url, 'DataCop MCP URL'),
+    toolCount,
+  };
+}
+
+function parseDatacopConfigurationApply(value) {
+  const payload = _i2Success(value, 'DataCop MCP configuration apply');
+  const mcp = _i2ContractObject(payload.mcp, 'DataCop MCP configuration apply payload');
+  if (mcp.reload_required !== false) {
+    throw new TypeError('DataCop MCP configuration must be active after save');
+  }
+  const gatewayRestart = _i2ContractObject(
+    mcp.gateway_restart,
+    'DataCop MCP gateway restart',
+  );
+  if (gatewayRestart.status !== 'completed') {
+    throw new TypeError('DataCop MCP gateway restart did not complete');
+  }
+  const toolCount = _i2NonNegativeSafeInteger(mcp.tool_count, 'DataCop MCP tool_count');
+  if (toolCount === 0) throw new TypeError('DataCop MCP must publish at least one tool');
+  return {
+    datacopMcpUrl: _i2ContractString(mcp.datacop_mcp_url, 'DataCop MCP URL'),
+    configuredProfiles: _i2KnowledgeProfileNames(
+      mcp.configured_profiles,
+      'DataCop MCP configured_profiles',
+    ),
+    missingProfiles: _i2KnowledgeProfileNames(
+      mcp.missing_profiles,
+      'DataCop MCP missing_profiles',
+    ),
+    toolCount,
+  };
+}
+
+async function checkDatacopConnectionRequest(payload) {
+  const values = normalizeDatacopConfiguration(payload, true);
+  return parseDatacopConnectionCheck(await api('/api/datacop-mcp/check', {
+    method: 'POST',
+    body: JSON.stringify(values),
+    retries: 0,
+    timeoutMs: 90_000,
+  }));
+}
+
+async function saveDatacopConfigurationRequest(payload) {
+  const values = normalizeDatacopConfiguration(payload, true);
+  return parseDatacopConfigurationApply(await api('/api/datacop-mcp', {
+    method: 'PUT',
+    body: JSON.stringify(values),
+    retries: 0,
+    timeoutMs: 420_000,
+  }));
 }
 
 function parseNodes(value) {
@@ -1088,6 +1193,14 @@ function _i2EnsureBindings() {
     logmonitorForm.addEventListener('change', _i2InvalidateLogmonitorPreflight);
     _i2InvalidateLogmonitorPreflight();
   }
+  const datacopForm = document.getElementById('i2streamDatacopConfig');
+  if (datacopForm) {
+    datacopForm.addEventListener('input', () => {
+      if (!_i2streamState.datacopConfigBusy) {
+        _i2SetStatus('i2streamDatacopConfigStatus', '');
+      }
+    });
+  }
   _i2streamState.bindingsReady = true;
 }
 
@@ -1128,7 +1241,7 @@ async function switchI2StreamSection(section, force = false) {
   });
   const title = document.getElementById('i2streamMainTitle');
   if (title) {
-    const key = {knowledge:'i2stream_knowledge',reports:'i2stream_reports',history:'i2stream_history',nodes:'i2stream_nodes',logmonitor:'i2stream_logmonitor'}[section];
+    const key = {knowledge:'i2stream_knowledge',datacop:'i2stream_datacop',reports:'i2stream_reports',history:'i2stream_history',nodes:'i2stream_nodes',logmonitor:'i2stream_logmonitor'}[section];
     title.dataset.i18n = key;
     title.textContent = _i2Text(key);
   }
@@ -1142,7 +1255,9 @@ async function switchI2StreamSection(section, force = false) {
       ? 'i2stream_nodes_explainer'
       : (section === 'logmonitor'
         ? 'i2stream_logmonitor_explainer'
-        : (scoped ? 'i2stream_client_explainer' : 'i2stream_global_explainer'));
+        : (section === 'datacop'
+          ? 'i2stream_datacop_explainer'
+          : (scoped ? 'i2stream_client_explainer' : 'i2stream_global_explainer')));
     scopeExplainer.dataset.i18n = key;
     scopeExplainer.textContent = _i2Text(key);
   }
@@ -1162,6 +1277,7 @@ async function switchI2StreamSection(section, force = false) {
     closeMobileSidebar();
   }
   if (section === 'knowledge' && (force || !_i2streamState.loaded.knowledge)) await loadI2StreamKnowledge();
+  if (section === 'datacop' && (force || !_i2streamState.loaded.datacop)) await loadI2StreamDatacop();
   if (section === 'reports' && (force || !_i2streamState.loaded.reports)) await loadI2StreamReports();
   if (section === 'nodes') await loadI2StreamNodes(true);
   if (section === 'history') {
@@ -1495,6 +1611,130 @@ async function loadI2StreamKnowledge() {
     _i2RenderFailure('i2streamKnowledgeList', 'i2streamKnowledgeStatus', error);
     _i2RenderKnowledgeSelectionControls();
     return false;
+  }
+}
+
+function _i2DatacopConfigPayload() {
+  const form = document.getElementById('i2streamDatacopConfig');
+  if (!form || !form.reportValidity()) {
+    throw new TypeError(_i2Text('i2stream_datacop_config_invalid'));
+  }
+  const values = {};
+  new FormData(form).forEach((value, key) => { values[key] = value; });
+  return normalizeDatacopConfiguration(
+    values,
+    _i2streamState.datacopConfiguration?.configured === true &&
+      _i2streamState.datacopConfiguration?.hasApiKey === true,
+  );
+}
+
+function _i2SetDatacopConfigBusy(busy) {
+  _i2streamState.datacopConfigBusy = busy;
+  const form = document.getElementById('i2streamDatacopConfig');
+  if (form) form.querySelectorAll('input, button').forEach(control => { control.disabled = busy; });
+}
+
+function _i2RenderDatacopConfiguration(configuration) {
+  _i2streamState.datacopConfiguration = configuration;
+  const mcpUrl = document.getElementById('i2streamDatacopMcpUrl');
+  const apiKey = document.getElementById('i2streamDatacopApiKey');
+  if (mcpUrl) mcpUrl.value = configuration.datacopMcpUrl || '';
+  if (apiKey) {
+    apiKey.value = '';
+    const canReuseApiKey = configuration.configured && configuration.hasApiKey;
+    apiKey.required = !canReuseApiKey;
+    const placeholderKey = canReuseApiKey
+      ? 'i2stream_datacop_api_key_replace_placeholder'
+      : 'i2stream_datacop_api_key_placeholder';
+    apiKey.dataset.i18nPlaceholder = placeholderKey;
+    apiKey.placeholder = _i2Text(placeholderKey);
+  }
+  const state = document.getElementById('i2streamDatacopConfigState');
+  if (state) {
+    const stateKey = configuration.configured
+      ? 'i2stream_datacop_config_configured'
+      : 'i2stream_datacop_config_not_configured';
+    state.className = `i2stream-knowledge-config-state${configuration.configured ? ' configured' : ''}`;
+    state.dataset.i18n = stateKey;
+    state.textContent = _i2Text(stateKey);
+  }
+  const form = document.getElementById('i2streamDatacopConfig');
+  if (form) form.querySelectorAll('input, button').forEach(control => {
+    control.disabled = _i2streamState.datacopConfigBusy;
+  });
+}
+
+async function loadI2StreamDatacop() {
+  const generation = ++_i2streamState.requestGeneration.datacop;
+  _i2SetStatus('i2streamDatacopConfigStatus', _i2Text('i2stream_datacop_config_loading'));
+  try {
+    const configuration = parseDatacopConfiguration(await api('/api/datacop-mcp'));
+    if (generation !== _i2streamState.requestGeneration.datacop) return false;
+    _i2RenderDatacopConfiguration(configuration);
+    _i2streamState.loaded.datacop = true;
+    _i2SetStatus('i2streamDatacopConfigStatus', '');
+    return true;
+  } catch (error) {
+    if (generation !== _i2streamState.requestGeneration.datacop) return false;
+    _i2streamState.loaded.datacop = false;
+    _i2streamState.datacopConfiguration = null;
+    _i2SetStatus('i2streamDatacopConfigStatus', `${_i2Text('error_prefix')}${error.message}`, 'error');
+    _i2SetDatacopConfigBusy(false);
+    return false;
+  }
+}
+
+async function checkI2StreamDatacopConfig() {
+  let payload;
+  try {
+    payload = _i2DatacopConfigPayload();
+  } catch (error) {
+    _i2SetStatus('i2streamDatacopConfigStatus', error.message, 'error');
+    return;
+  }
+  _i2SetDatacopConfigBusy(true);
+  _i2SetStatus('i2streamDatacopConfigStatus', _i2Text('i2stream_datacop_config_checking'));
+  try {
+    const checked = await checkDatacopConnectionRequest(payload);
+    _i2SetStatus(
+      'i2streamDatacopConfigStatus',
+      _i2Text('i2stream_datacop_config_check_passed', checked.toolCount),
+    );
+  } catch (error) {
+    _i2SetStatus('i2streamDatacopConfigStatus', `${_i2Text('error_prefix')}${error.message}`, 'error');
+  } finally {
+    _i2SetDatacopConfigBusy(false);
+  }
+}
+
+async function saveI2StreamDatacopConfig(event) {
+  event.preventDefault();
+  let payload;
+  try {
+    payload = _i2DatacopConfigPayload();
+  } catch (error) {
+    _i2SetStatus('i2streamDatacopConfigStatus', error.message, 'error');
+    return;
+  }
+  _i2SetDatacopConfigBusy(true);
+  _i2SetStatus('i2streamDatacopConfigStatus', _i2Text('i2stream_datacop_config_saving'));
+  try {
+    const applied = await saveDatacopConfigurationRequest(payload);
+    const loaded = await loadI2StreamDatacop();
+    if (!loaded) return;
+    let message = _i2Text('i2stream_datacop_config_saved', applied.toolCount);
+    if (applied.missingProfiles.length) {
+      message += ` ${_i2Text('i2stream_datacop_missing_profiles', applied.missingProfiles.join(', '))}`;
+    }
+    _i2SetStatus(
+      'i2streamDatacopConfigStatus',
+      message,
+      applied.missingProfiles.length ? 'warning' : '',
+    );
+  } catch (error) {
+    _i2SetStatus('i2streamDatacopConfigStatus', `${_i2Text('error_prefix')}${error.message}`, 'error');
+  } finally {
+    _i2SetDatacopConfigBusy(false);
   }
 }
 
@@ -2051,6 +2291,13 @@ window.__i2streamConsoleTest = {
   parseKnowledgeMcpSync,
   normalizeKnowledgeConfiguration,
   saveKnowledgeConfigurationRequest,
+  parseDatacopConfiguration,
+  normalizeDatacopConfiguration,
+  parseDatacopConnectionCheck,
+  parseDatacopConfigurationApply,
+  checkDatacopConnectionRequest,
+  saveDatacopConfigurationRequest,
+  loadI2StreamDatacop,
   reconcileKnowledgeSelection,
   deleteKnowledgeFiles: _i2DeleteKnowledgeFiles,
   parseReports,

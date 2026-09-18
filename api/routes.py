@@ -13311,6 +13311,9 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path.startswith("/api/") and not _guard_request_session_visibility(handler, parsed, method="GET"):
         return True
 
+    if parsed.path == "/api/datacop-mcp":
+        return _handle_i2stream_datacop_mcp_get(handler)
+
     # ── Insights / knowledge status ──
     if parsed.path == "/api/insights":
         return _handle_insights(handler, parsed)
@@ -15205,6 +15208,9 @@ def handle_post(handler, parsed) -> bool:
         if diag:
             diag.finish()
         return True
+
+    if parsed.path == "/api/datacop-mcp/check":
+        return _handle_i2stream_datacop_mcp_check(handler, body)
 
     if parsed.path == "/api/escape/authorize":
         return _handle_escape_authorize(handler, parsed, body)
@@ -18001,6 +18007,8 @@ def handle_put(handler, parsed) -> bool:
     body = read_body(handler)
     if not _guard_request_session_visibility(handler, parsed, body=body, method="PUT"):
         return True
+    if parsed.path == "/api/datacop-mcp":
+        return _handle_i2stream_datacop_mcp_update(handler, body)
     if parsed.path == "/api/rag-service-mcp":
         return _handle_i2stream_rag_mcp_update(handler, body)
     if parsed.path.startswith("/api/mcp/servers/"):
@@ -29726,5 +29734,83 @@ def _handle_i2stream_rag_mcp_update(handler, body):
         return bad(handler, str(exc))
     except RuntimeError as exc:
         logger.exception("Failed to update i2Stream RAG MCP profile configuration")
+        return bad(handler, str(exc), status=500)
+    return j(handler, {"code": 0, "status": "success", "mcp": result})
+
+
+def _require_datacop_mcp_configuration_auth(handler) -> bool:
+    """Require login protection before accepting or exposing MCP configuration."""
+    from api.auth import is_auth_enabled
+
+    if is_auth_enabled():
+        return True
+    bad(handler, "启用 WebUI 登录保护后才能管理 DataCop MCP 配置", status=503)
+    return False
+
+
+def _handle_i2stream_datacop_mcp_get(handler):
+    """Return DataCop MCP configuration state without exposing the API key."""
+    if not _require_datacop_mcp_configuration_auth(handler):
+        return True
+
+    from api.i2stream_datacop_mcp import get_datacop_mcp_configuration
+
+    try:
+        result = get_datacop_mcp_configuration()
+    except RuntimeError as exc:
+        logger.exception("Failed to read i2Stream DataCop MCP profile configuration")
+        return bad(handler, str(exc), status=500)
+    return j(handler, {"code": 0, "status": "success", "mcp": result})
+
+
+def _handle_i2stream_datacop_mcp_check(handler, body):
+    """Probe DataCop MCP with the submitted URL and key without saving them."""
+    if not _require_datacop_mcp_configuration_auth(handler):
+        return True
+    if not isinstance(body, dict) or set(body) != {"datacop_mcp_url", "api_key"}:
+        return bad(
+            handler,
+            "datacop_mcp_url and api_key are required and must be the only fields",
+        )
+
+    from api.i2stream_datacop_mcp import check_datacop_mcp_connection
+
+    try:
+        result = check_datacop_mcp_connection(
+            body["datacop_mcp_url"],
+            body["api_key"],
+        )
+    except ValueError as exc:
+        return bad(handler, str(exc))
+    except RuntimeError as exc:
+        logger.warning("DataCop MCP connection check failed: %s", exc)
+        return bad(handler, str(exc), status=502)
+    return j(handler, {"code": 0, "status": "success", "mcp": result})
+
+
+def _handle_i2stream_datacop_mcp_update(handler, body):
+    """Configure DataCop MCP in the managed Hermes profiles and activate it."""
+    if not _require_datacop_mcp_configuration_auth(handler):
+        return True
+    if not isinstance(body, dict) or set(body) != {"datacop_mcp_url", "api_key"}:
+        return bad(
+            handler,
+            "datacop_mcp_url and api_key are required and must be the only fields",
+        )
+
+    from api.i2stream_datacop_mcp import apply_datacop_mcp_configuration
+
+    try:
+        result = apply_datacop_mcp_configuration(
+            body["datacop_mcp_url"],
+            body["api_key"],
+        )
+    except ValueError as exc:
+        return bad(handler, str(exc))
+    except RuntimeError as exc:
+        logger.error(
+            "Failed to update i2Stream DataCop MCP profile configuration: %s",
+            exc,
+        )
         return bad(handler, str(exc), status=500)
     return j(handler, {"code": 0, "status": "success", "mcp": result})

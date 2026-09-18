@@ -56,7 +56,7 @@ def test_i2stream_has_desktop_mobile_sidebar_and_main_surfaces():
     assert INDEX.count('src="static/i2.ico?v=__WEBUI_VERSION__"') == 2
     assert 'id="panelI2stream"' in INDEX
     assert 'id="mainI2stream"' in INDEX
-    for section in ("knowledge", "reports", "history", "nodes", "logmonitor"):
+    for section in ("knowledge", "datacop", "reports", "history", "nodes", "logmonitor"):
         assert f'data-i2stream-section="{section}"' in INDEX
     assert 'id="i2streamKnowledgeUpload"' in INDEX
     assert 'id="i2streamMainContent"' in INDEX
@@ -65,13 +65,13 @@ def test_i2stream_has_desktop_mobile_sidebar_and_main_surfaces():
     assert 'onsubmit="submitI2StreamHistoryClientId(event)"' in INDEX
     assert 'id="i2streamNodesList"' in INDEX
     assert 'id="i2streamNodesStatus"' in INDEX
-    for section in ("Knowledge", "Reports", "History", "Nodes", "Logmonitor"):
+    for section in ("Knowledge", "Datacop", "Reports", "History", "Nodes", "Logmonitor"):
         assert f'id="i2stream{section}Tab"' in INDEX
         assert f'aria-controls="i2stream{section}Page"' in INDEX
         assert f'id="i2stream{section}Page" role="tabpanel"' in INDEX
         assert f'aria-labelledby="i2stream{section}Tab"' in INDEX
     assert 'id="i2streamKnowledgeTab" role="tab" tabindex="0"' in INDEX
-    for section in ("Reports", "History", "Nodes", "Logmonitor"):
+    for section in ("Datacop", "Reports", "History", "Nodes", "Logmonitor"):
         assert f'id="i2stream{section}Tab" role="tab" tabindex="-1"' in INDEX
     source = MODULE_PATH.read_text(encoding="utf-8")
     for key in ("ArrowRight", "ArrowDown", "ArrowLeft", "ArrowUp", "Home", "End"):
@@ -102,6 +102,122 @@ def test_knowledge_view_exposes_service_configuration_before_upload():
     assert 'onclick="checkI2StreamKnowledgeConfig()"' in INDEX
     assert 'onsubmit="saveI2StreamKnowledgeConfig(event)"' in INDEX
     assert 'id="i2streamKnowledgeUnconfigured"' in INDEX
+
+
+def test_datacop_view_accepts_url_and_secret_without_rendering_a_saved_key():
+    assert 'id="i2streamDatacopConfig"' in INDEX
+    assert 'onsubmit="saveI2StreamDatacopConfig(event)"' in INDEX
+    assert 'id="i2streamDatacopMcpUrl"' in INDEX
+    assert 'name="datacop_mcp_url"' in INDEX
+    assert re.search(
+        r'id="i2streamDatacopApiKey"[^>]*name="api_key"[^>]*type="password"',
+        INDEX,
+    )
+    assert 'onclick="checkI2StreamDatacopConfig()"' in INDEX
+    api_key_input = re.search(r'<input id="i2streamDatacopApiKey"[^>]*>', INDEX)
+    assert api_key_input is not None
+    assert ' value=' not in api_key_input.group(0)
+    source = MODULE_PATH.read_text(encoding="utf-8")
+    assert "apiKey.required = !canReuseApiKey" in source
+    assert "datacopForm.addEventListener('input'" in source
+
+
+def test_datacop_frontend_contract_redacts_state_and_uses_long_apply_timeout():
+    result = _run_contract_case(
+        """
+const configured = c.parseDatacopConfiguration({
+  code: 0,
+  status: 'success',
+  mcp: {
+    configured: true,
+    datacop_mcp_url: 'http://datacop:8301/mcp',
+    has_api_key: true,
+    configured_profiles: ['default', 'stream-qa'],
+    missing_profiles: []
+  }
+});
+const calls = [];
+sandbox.api = async (url, options) => {
+  calls.push({
+    url,
+    method: options.method,
+    body: JSON.parse(options.body),
+    retries: options.retries,
+    timeoutMs: options.timeoutMs
+  });
+  if (url.endsWith('/check')) {
+    return {
+      code: 0, status: 'success',
+      mcp: {datacop_mcp_url: 'http://datacop:8301/mcp', tool_count: 3}
+    };
+  }
+  return {
+    code: 0, status: 'success',
+    mcp: {
+      datacop_mcp_url: 'http://datacop:8301/mcp',
+      configured_profiles: ['default', 'stream-qa'],
+      missing_profiles: [],
+      tool_count: 3,
+      reload_required: false,
+      gateway_restart: {status: 'completed', profiles: []}
+    }
+  };
+};
+const checked = await c.checkDatacopConnectionRequest({
+  datacop_mcp_url: 'http://datacop:8301/mcp', api_key: 'opaque-key'
+});
+const applied = await c.saveDatacopConfigurationRequest({
+  datacop_mcp_url: 'http://datacop:8301/mcp', api_key: 'opaque-key'
+});
+const reused = c.normalizeDatacopConfiguration({
+  datacop_mcp_url: 'http://datacop:8301/mcp', api_key: ''
+}, true);
+let whitespaceRejected = false;
+try {
+  c.normalizeDatacopConfiguration({
+    datacop_mcp_url: 'http://datacop:8301/mcp', api_key: ' key'
+  });
+} catch (error) { whitespaceRejected = error.name === 'TypeError'; }
+output = {configured, calls, checked, applied, reused, whitespaceRejected};
+"""
+    )
+
+    assert result["configured"] == {
+        "configured": True,
+        "datacopMcpUrl": "http://datacop:8301/mcp",
+        "hasApiKey": True,
+        "configuredProfiles": ["default", "stream-qa"],
+        "missingProfiles": [],
+    }
+    assert result["calls"] == [
+        {
+            "url": "/api/datacop-mcp/check",
+            "method": "POST",
+            "body": {
+                "datacop_mcp_url": "http://datacop:8301/mcp",
+                "api_key": "opaque-key",
+            },
+            "retries": 0,
+            "timeoutMs": 90_000,
+        },
+        {
+            "url": "/api/datacop-mcp",
+            "method": "PUT",
+            "body": {
+                "datacop_mcp_url": "http://datacop:8301/mcp",
+                "api_key": "opaque-key",
+            },
+            "retries": 0,
+            "timeoutMs": 420_000,
+        },
+    ]
+    assert result["checked"]["toolCount"] == 3
+    assert result["applied"]["configuredProfiles"] == ["default", "stream-qa"]
+    assert result["reused"] == {
+        "datacop_mcp_url": "http://datacop:8301/mcp",
+        "api_key": "",
+    }
+    assert result["whitespaceRejected"] is True
 
 
 def test_knowledge_view_exposes_collection_selector_and_creator_before_upload():
@@ -1183,7 +1299,10 @@ def test_i2stream_module_uses_only_same_origin_console_api_contract():
     assert "method: 'DELETE'" in source
     assert "client_id:" in source
     assert "files.some(file => file.size > MAX_UPLOAD_BYTES)" in source
-    assert "requestGeneration: {knowledge: 0, reports: 0, history: 0, nodes: 0}" in source
+    assert (
+        "requestGeneration: {knowledge: 0, datacop: 0, reports: 0, history: 0, nodes: 0}"
+        in source
+    )
     assert "historyDetailGeneration" in source
     assert source.count("generation !== _i2streamState.historyDetailGeneration") == 2
 
