@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import threading
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -14,10 +15,16 @@ from api.config import (
     reload_config as reload_active_config,
 )
 from api.profiles import get_hermes_home_for_profile
+from api.i2stream_gateway_restart import (
+    DEFAULT_GATEWAY_PROFILES,
+    reset_webui_mcp_runtime,
+    restart_managed_gateways,
+)
 
 
 RAG_MCP_SERVER_NAME = "i2up-rag-service-mcp"
-RAG_MCP_PROFILES = ("default", "stream-qa")
+RAG_MCP_PROFILES = DEFAULT_GATEWAY_PROFILES
+_RAG_MCP_APPLY_LOCK = threading.Lock()
 
 
 def normalize_rag_mcp_url(value: object) -> str:
@@ -145,3 +152,24 @@ def configure_rag_mcp_profiles(rag_service_mcp_url: object) -> dict[str, object]
         "missing_profiles": missing_profiles,
         "reload_required": True,
     }
+
+
+def apply_rag_mcp_configuration(rag_service_mcp_url: object) -> dict[str, object]:
+    """Persist the RAG MCP URL and restart every profile updated by this call."""
+
+    with _RAG_MCP_APPLY_LOCK:
+        result = configure_rag_mcp_profiles(rag_service_mcp_url)
+        configured_profiles = result.get("configured_profiles")
+        if not isinstance(configured_profiles, list) or not all(
+            isinstance(profile, str) for profile in configured_profiles
+        ):
+            raise RuntimeError(
+                "Hermes MCP profile update returned invalid configured_profiles"
+            )
+        gateway_restart = restart_managed_gateways(tuple(configured_profiles))
+        reset_webui_mcp_runtime()
+        return {
+            **result,
+            "reload_required": False,
+            "gateway_restart": gateway_restart,
+        }

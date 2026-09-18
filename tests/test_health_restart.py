@@ -101,6 +101,87 @@ def test_restart_active_profile_gateway_success_uses_active_profile_home(monkeyp
     assert gateway_restart._GATEWAY_RESTART_LOCK.locked() is False
 
 
+def test_restart_active_profile_gateway_uses_i2stream_supervisor(monkeypatch):
+    from api import i2stream_gateway_restart
+
+    calls = []
+    monkeypatch.setattr(i2stream_gateway_restart, "_supervisor_is_ready", lambda: True)
+    monkeypatch.setattr(
+        i2stream_gateway_restart,
+        "restart_managed_gateways",
+        lambda profiles: calls.append(profiles)
+        or {
+            "status": "completed",
+            "profiles": [
+                {"profile": "stream-qa", "old_pid": 202, "new_pid": 404, "port": 8641}
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        gateway_restart.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("managed restart must not launch hermes gateway restart")
+        ),
+    )
+
+    result = gateway_restart.restart_active_profile_gateway(profile="stream-qa")
+
+    assert result["status"] == "completed"
+    assert result["managed_restart"]["profiles"][0]["new_pid"] == 404
+    assert calls == [("stream-qa",)]
+
+
+def test_managed_gateway_restart_returns_in_progress_after_quick_timeout(monkeypatch):
+    import time
+
+    from api import i2stream_gateway_restart
+
+    gateway_restart._GATEWAY_RESTART_LOCK = threading.Lock()
+    finished = threading.Event()
+    monkeypatch.setattr(i2stream_gateway_restart, "_supervisor_is_ready", lambda: True)
+
+    def slow_restart(_profiles):
+        time.sleep(0.1)
+        finished.set()
+        return {"status": "completed", "profiles": []}
+
+    monkeypatch.setattr(
+        i2stream_gateway_restart,
+        "restart_managed_gateways",
+        slow_restart,
+    )
+
+    result = gateway_restart.restart_active_profile_gateway(
+        profile="default",
+        quick_timeout_seconds=0.01,
+    )
+
+    assert result["status"] == "in_progress"
+    assert finished.wait(timeout=1)
+    assert gateway_restart._GATEWAY_RESTART_LOCK.locked() is False
+
+
+def test_managed_gateway_restart_rejects_unmanaged_profile(monkeypatch):
+    from api import i2stream_gateway_restart
+
+    popen_called = False
+    monkeypatch.setattr(i2stream_gateway_restart, "_supervisor_is_ready", lambda: True)
+
+    def fail_popen(*_args, **_kwargs):
+        nonlocal popen_called
+        popen_called = True
+        raise AssertionError("unmanaged profile must not launch a detached gateway")
+
+    monkeypatch.setattr(gateway_restart.subprocess, "Popen", fail_popen)
+
+    result = gateway_restart.restart_active_profile_gateway(profile="other-profile")
+
+    assert result["status"] == "failed"
+    assert "not managed" in result["message"]
+    assert popen_called is False
+
+
 def test_restart_active_profile_gateway_pins_explicit_default_profile(monkeypatch):
     gateway_restart._GATEWAY_RESTART_LOCK = threading.Lock()
     called = {}

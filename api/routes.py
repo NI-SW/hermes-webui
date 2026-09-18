@@ -1297,6 +1297,20 @@ def _run_gateway_lifecycle_command(action: str) -> subprocess.CompletedProcess:
     if action not in {"start", "stop", "restart"}:
         raise ValueError("unsupported gateway action")
 
+    if action == "restart":
+        from api.i2stream_gateway_restart import _supervisor_is_ready
+
+        if _supervisor_is_ready():
+            outcome = restart_active_profile_gateway()
+            completed = outcome.get("status") in {"completed", "in_progress"}
+            message = str(outcome.get("message") or "Managed gateway restart failed")
+            return subprocess.CompletedProcess(
+                args=["managed-gateway-restart"],
+                returncode=0 if completed else 1,
+                stdout=message if completed else "",
+                stderr="" if completed else message,
+            )
+
     from api import config as api_config
     from api.profiles import get_active_profile_name
 
@@ -29704,10 +29718,10 @@ def _handle_i2stream_rag_mcp_update(handler, body):
     if not isinstance(body, dict) or set(body) != {"rag_service_mcp_url"}:
         return bad(handler, "rag_service_mcp_url is required and must be the only field")
 
-    from api.i2stream_rag_mcp import configure_rag_mcp_profiles
+    from api.i2stream_rag_mcp import apply_rag_mcp_configuration
 
     try:
-        result = configure_rag_mcp_profiles(body["rag_service_mcp_url"])
+        result = apply_rag_mcp_configuration(body["rag_service_mcp_url"])
     except ValueError as exc:
         return bad(handler, str(exc))
     except RuntimeError as exc:

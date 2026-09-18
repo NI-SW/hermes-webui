@@ -3,6 +3,8 @@ from unittest.mock import MagicMock
 from urllib.parse import urlparse
 
 import json
+import threading
+import time
 
 import pytest
 
@@ -263,18 +265,97 @@ def test_configure_rag_mcp_profiles_rejects_invalid_existing_server_shape(
         )
 
 
-def test_rag_mcp_update_handler_returns_profile_and_reload_state(monkeypatch):
+def test_apply_rag_mcp_configuration_serializes_configure_restart_and_reset(
+    monkeypatch,
+):
+    from api import i2stream_rag_mcp
+
+    first_restart_started = threading.Event()
+    release_first_restart = threading.Event()
+    events = []
+    errors = []
+
+    def configure(url):
+        events.append(("configure", url))
+        return {
+            "rag_service_mcp_url": url,
+            "configured_profiles": ["default"],
+            "missing_profiles": [],
+            "reload_required": True,
+        }
+
+    def restart(profiles):
+        events.append(("restart", profiles))
+        if not first_restart_started.is_set():
+            first_restart_started.set()
+            assert release_first_restart.wait(timeout=2)
+        return {"status": "completed", "profiles": []}
+
+    monkeypatch.setattr(i2stream_rag_mcp, "configure_rag_mcp_profiles", configure)
+    monkeypatch.setattr(i2stream_rag_mcp, "restart_managed_gateways", restart)
+    monkeypatch.setattr(
+        i2stream_rag_mcp,
+        "reset_webui_mcp_runtime",
+        lambda: events.append(("reset",)),
+    )
+
+    def apply(url):
+        try:
+            i2stream_rag_mcp.apply_rag_mcp_configuration(url)
+        except Exception as exc:
+            errors.append(exc)
+
+    first = threading.Thread(target=apply, args=("http://rag-a:8900/mcp",))
+    second = threading.Thread(target=apply, args=("http://rag-b:8900/mcp",))
+    first.start()
+    assert first_restart_started.wait(timeout=2)
+    second.start()
+    time.sleep(0.05)
+
+    assert events == [
+        ("configure", "http://rag-a:8900/mcp"),
+        ("restart", ("default",)),
+    ]
+
+    release_first_restart.set()
+    first.join(timeout=2)
+    second.join(timeout=2)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert errors == []
+    assert events == [
+        ("configure", "http://rag-a:8900/mcp"),
+        ("restart", ("default",)),
+        ("reset",),
+        ("configure", "http://rag-b:8900/mcp"),
+        ("restart", ("default",)),
+        ("reset",),
+    ]
+
+
+def test_rag_mcp_update_handler_restarts_configured_gateways(monkeypatch):
     from api import routes
 
     monkeypatch.setattr("api.auth.is_auth_enabled", lambda: True)
-    monkeypatch.setattr(
-        "api.i2stream_rag_mcp.configure_rag_mcp_profiles",
-        lambda url: {
-            "rag_service_mcp_url": url,
+    apply_configuration = MagicMock(
+        return_value={
+            "rag_service_mcp_url": "http://192.168.34.65:8900/mcp",
             "configured_profiles": ["default", "stream-qa"],
             "missing_profiles": [],
-            "reload_required": True,
-        },
+            "reload_required": False,
+            "gateway_restart": {
+                "status": "completed",
+                "profiles": [
+                    {"profile": "default", "old_pid": 101, "new_pid": 303, "port": 8642},
+                    {"profile": "stream-qa", "old_pid": 202, "new_pid": 404, "port": 8641},
+                ],
+            },
+        }
+    )
+    monkeypatch.setattr(
+        "api.i2stream_rag_mcp.apply_rag_mcp_configuration",
+        apply_configuration,
     )
     handler = MagicMock()
 
@@ -285,6 +366,7 @@ def test_rag_mcp_update_handler_returns_profile_and_reload_state(monkeypatch):
 
     payload = json.loads(handler.wfile.write.call_args.args[0].decode("utf-8"))
     assert handler.send_response.call_args.args[0] == 200
+    apply_configuration.assert_called_once_with("http://192.168.34.65:8900/mcp")
     assert payload == {
         "code": 0,
         "status": "success",
@@ -292,9 +374,38 @@ def test_rag_mcp_update_handler_returns_profile_and_reload_state(monkeypatch):
             "rag_service_mcp_url": "http://192.168.34.65:8900/mcp",
             "configured_profiles": ["default", "stream-qa"],
             "missing_profiles": [],
-            "reload_required": True,
+            "reload_required": False,
+            "gateway_restart": {
+                "status": "completed",
+                "profiles": [
+                    {"profile": "default", "old_pid": 101, "new_pid": 303, "port": 8642},
+                    {"profile": "stream-qa", "old_pid": 202, "new_pid": 404, "port": 8641},
+                ],
+            },
         },
     }
+
+
+def test_rag_mcp_update_handler_reports_gateway_restart_failure(monkeypatch):
+    from api import routes
+
+    monkeypatch.setattr("api.auth.is_auth_enabled", lambda: True)
+    monkeypatch.setattr(
+        "api.i2stream_rag_mcp.apply_rag_mcp_configuration",
+        lambda _url: (_ for _ in ()).throw(
+            RuntimeError("default gateway did not recover")
+        ),
+    )
+    handler = MagicMock()
+
+    routes._handle_i2stream_rag_mcp_update(
+        handler,
+        {"rag_service_mcp_url": "http://192.168.34.65:8900/mcp"},
+    )
+
+    payload = json.loads(handler.wfile.write.call_args.args[0].decode("utf-8"))
+    assert handler.send_response.call_args.args[0] == 500
+    assert payload["error"] == "default gateway did not recover"
 
 
 @pytest.mark.parametrize(

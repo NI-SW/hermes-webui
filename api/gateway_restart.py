@@ -52,6 +52,61 @@ def _release_lock() -> None:
         pass
 
 
+def _restart_supervised_gateway(
+    profile: str,
+    *,
+    quick_timeout_seconds: float,
+) -> dict:
+    """Start a managed restart and preserve the HTTP helper's quick return."""
+    from api.i2stream_gateway_restart import restart_managed_gateways
+
+    if not _GATEWAY_RESTART_LOCK.acquire(blocking=False):
+        return {
+            "status": "busy",
+            "message": "Restart already in progress. Please wait a moment and try again.",
+        }
+
+    finished = threading.Event()
+    outcome: dict[str, dict] = {}
+
+    def _restart() -> None:
+        try:
+            managed_restart = restart_managed_gateways((profile,))
+            outcome["result"] = {
+                "status": "completed",
+                "message": "Managed gateway restarted successfully",
+                "managed_restart": managed_restart,
+            }
+        except (ValueError, RuntimeError) as exc:
+            outcome["result"] = {"status": "failed", "message": str(exc)}
+        except Exception as exc:
+            logger.exception("Unexpected managed gateway restart failure")
+            outcome["result"] = {
+                "status": "failed",
+                "message": f"Internal error running restart: {type(exc).__name__}: {exc}",
+            }
+        finally:
+            _release_lock()
+            finished.set()
+
+    try:
+        threading.Thread(target=_restart, daemon=True).start()
+    except Exception as exc:
+        _release_lock()
+        logger.exception("Failed to start managed gateway restart worker")
+        return {
+            "status": "failed",
+            "message": f"Internal error running restart: {type(exc).__name__}: {exc}",
+        }
+
+    if finished.wait(timeout=quick_timeout_seconds):
+        return outcome["result"]
+    return {
+        "status": "in_progress",
+        "message": "Gateway service restart initiated (in progress)",
+    }
+
+
 def _gateway_restart_profile_context(profile: str | None = None) -> tuple[Path, str | None]:
     """Return the HERMES_HOME and CLI profile arg for a gateway restart."""
     if profile is None:
@@ -80,7 +135,7 @@ def restart_active_profile_gateway(
     quick_timeout_seconds: float = 2.0,
     background_wait_seconds: float = 240.0,
 ) -> dict:
-    """Run a non-blocking ``hermes gateway restart`` for the active profile.
+    """Restart the active Gateway through the available lifecycle controller.
 
     Returns a short status dict with these values:
     - completed: command finished quickly and succeeded.
@@ -88,6 +143,35 @@ def restart_active_profile_gateway(
     - failed: command finished quickly with non-zero exit status.
     - busy: restart already in progress from another caller.
     """
+    from api.i2stream_gateway_restart import (
+        MANAGED_GATEWAYS,
+        _supervisor_is_ready,
+    )
+
+    if _supervisor_is_ready():
+        if profile is None:
+            raw_profile = str(get_active_profile_name() or "default").strip()
+        else:
+            raw_profile = str(profile or "")
+            if not raw_profile or not _PROFILE_ID_RE.fullmatch(raw_profile):
+                return {
+                    "status": "failed",
+                    "message": f"Invalid profile for gateway restart: {profile!r}",
+                }
+        managed_profile = "default" if _is_root_profile(raw_profile) else raw_profile
+        if managed_profile not in MANAGED_GATEWAYS:
+            return {
+                "status": "failed",
+                "message": (
+                    f"Gateway profile {managed_profile!r} is not managed by "
+                    "the i2Stream container supervisor"
+                ),
+            }
+        return _restart_supervised_gateway(
+            managed_profile,
+            quick_timeout_seconds=quick_timeout_seconds,
+        )
+
     if not _GATEWAY_RESTART_LOCK.acquire(blocking=False):
         return {
             "status": "busy",

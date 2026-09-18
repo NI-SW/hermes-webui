@@ -185,6 +185,52 @@ def test_gateway_restart_uses_restart_subcommand(monkeypatch, tmp_path):
     assert calls[0][-2:] == ["gateway", "restart"]
 
 
+def test_gateway_restart_uses_i2stream_supervisor_when_available(monkeypatch):
+    from api import i2stream_gateway_restart, routes
+
+    monkeypatch.setattr(i2stream_gateway_restart, "_supervisor_is_ready", lambda: True)
+    restart = lambda: {
+        "status": "completed",
+        "message": "Managed gateway restarted successfully",
+    }
+    monkeypatch.setattr(routes, "restart_active_profile_gateway", restart)
+    monkeypatch.setattr(
+        routes.subprocess,
+        "run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("managed restart must not launch the Hermes CLI")
+        ),
+    )
+    monkeypatch.setattr(routes, "_gateway_status_payload", lambda: {"running": True})
+
+    handler, data = _call_post(monkeypatch, "/api/gateway/restart")
+
+    assert handler.status == 200
+    assert data["ok"] is True
+    assert data["action"] == "restart"
+
+
+def test_gateway_restart_accepts_supervisor_restart_in_progress(monkeypatch):
+    from api import i2stream_gateway_restart, routes
+
+    monkeypatch.setattr(i2stream_gateway_restart, "_supervisor_is_ready", lambda: True)
+    monkeypatch.setattr(
+        routes,
+        "restart_active_profile_gateway",
+        lambda: {
+            "status": "in_progress",
+            "message": "Gateway service restart initiated (in progress)",
+        },
+    )
+    monkeypatch.setattr(routes, "_gateway_status_payload", lambda: {"running": True})
+
+    handler, data = _call_post(monkeypatch, "/api/gateway/restart")
+
+    assert handler.status == 200
+    assert data["ok"] is True
+    assert data["action"] == "restart"
+
+
 def test_gateway_lifecycle_timeout_returns_gateway_timeout(monkeypatch, tmp_path):
     from api import config, profiles, routes
 
