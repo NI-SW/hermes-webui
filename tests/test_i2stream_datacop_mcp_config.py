@@ -75,7 +75,7 @@ def test_probe_datacop_mcp_uses_bearer_header_and_returns_no_key(monkeypatch):
 
     assert calls == [
         (
-            "datacop",
+            "i2stream-knowledge-mcp",
             {
                 "url": "http://datacop.example.test:8301/mcp",
                 "headers": {
@@ -137,9 +137,17 @@ def test_configure_datacop_mcp_profiles_updates_both_profiles(monkeypatch, tmp_p
     homes = _profile_homes(tmp_path)
     configs = {
         homes["default"]: {
-            "mcp_servers": {"other": {"url": "http://other:9000/mcp", "enabled": True}}
+            "mcp_servers": {
+                "other": {"url": "http://other:9000/mcp", "enabled": True},
+                "datacop": {"url": "http://legacy:8301/mcp", "enabled": True},
+            }
         },
-        homes["stream-qa"]: {"model": {"default": "qa-model"}},
+        homes["stream-qa"]: {
+            "model": {"default": "qa-model"},
+            "mcp_servers": {
+                "datacop": {"url": "http://legacy:8301/mcp", "enabled": True}
+            },
+        },
     }
     saved = {}
     monkeypatch.setattr(
@@ -184,11 +192,11 @@ def test_configure_datacop_mcp_profiles_updates_both_profiles(monkeypatch, tmp_p
     }
     assert saved[homes["default"] / "config.yaml"]["mcp_servers"] == {
         "other": {"url": "http://other:9000/mcp", "enabled": True},
-        "datacop": expected_server,
+        "i2stream-knowledge-mcp": expected_server,
     }
     assert saved[homes["stream-qa"] / "config.yaml"] == {
         "model": {"default": "qa-model"},
-        "mcp_servers": {"datacop": expected_server},
+        "mcp_servers": {"i2stream-knowledge-mcp": expected_server},
     }
     assert "opaque-key" not in json.dumps(result)
 
@@ -269,7 +277,7 @@ def test_check_datacop_mcp_can_reuse_matching_stored_key(monkeypatch, tmp_path):
     monkeypatch.setattr(
         i2stream_datacop_mcp,
         "load_profile_config_raw",
-        lambda _path: {"mcp_servers": {"datacop": server}},
+        lambda _path: {"mcp_servers": {"i2stream-knowledge-mcp": server}},
     )
     calls = []
     monkeypatch.setattr(
@@ -307,7 +315,7 @@ def test_blank_datacop_key_cannot_be_reused_for_a_different_url(monkeypatch, tmp
     monkeypatch.setattr(
         i2stream_datacop_mcp,
         "load_profile_config_raw",
-        lambda _path: {"mcp_servers": {"datacop": server}},
+        lambda _path: {"mcp_servers": {"i2stream-knowledge-mcp": server}},
     )
 
     with pytest.raises(ValueError, match="更改.*必须输入"):
@@ -336,7 +344,7 @@ def test_read_datacop_mcp_status_is_redacted(monkeypatch, tmp_path):
     monkeypatch.setattr(
         i2stream_datacop_mcp,
         "load_profile_config_raw",
-        lambda _path: {"mcp_servers": {"datacop": server}},
+        lambda _path: {"mcp_servers": {"i2stream-knowledge-mcp": server}},
     )
 
     status = i2stream_datacop_mcp.get_datacop_mcp_configuration()
@@ -397,7 +405,7 @@ def test_read_datacop_mcp_status_reports_partial_configuration(monkeypatch, tmp_
         i2stream_datacop_mcp,
         "load_profile_config_raw",
         lambda path: (
-            {"mcp_servers": {"datacop": server}}
+            {"mcp_servers": {"i2stream-knowledge-mcp": server}}
             if Path(path).parent == homes["default"]
             else {"mcp_servers": {}}
         ),
@@ -426,7 +434,7 @@ def test_read_datacop_mcp_status_rejects_unmanaged_extra_header(monkeypatch, tmp
         "load_profile_config_raw",
         lambda _path: {
             "mcp_servers": {
-                "datacop": {
+                "i2stream-knowledge-mcp": {
                     "url": "http://datacop:8301/mcp",
                     "headers": {
                         "Accept": "application/json, text/event-stream",
@@ -459,7 +467,7 @@ def test_read_datacop_mcp_configuration_rejects_profile_mismatch(
     configs = {
         homes["default"]: {
             "mcp_servers": {
-                "datacop": {
+                "i2stream-knowledge-mcp": {
                     "url": "http://datacop-a:8301/mcp",
                     "headers": {
                         "Accept": "application/json, text/event-stream",
@@ -471,7 +479,7 @@ def test_read_datacop_mcp_configuration_rejects_profile_mismatch(
         },
         homes["stream-qa"]: {
             "mcp_servers": {
-                "datacop": {
+                "i2stream-knowledge-mcp": {
                     "url": stream_qa_url,
                     "headers": {
                         "Accept": "application/json, text/event-stream",

@@ -26,7 +26,8 @@ from api.i2stream_mcp_config_lock import mcp_config_transaction_lock
 from api.profiles import get_hermes_home_for_profile
 
 
-DATACOP_MCP_SERVER_NAME = "datacop"
+DATACOP_MCP_SERVER_NAME = "i2stream-knowledge-mcp"
+_LEGACY_DATACOP_MCP_SERVER_NAME = "datacop"
 DATACOP_MCP_PROFILES = DEFAULT_GATEWAY_PROFILES
 DATACOP_MCP_ACCEPT = "application/json, text/event-stream"
 DATACOP_API_KEY_MAX_LENGTH = 4096
@@ -163,6 +164,7 @@ def _profile_config_with_datacop_server(
         servers = {}
     if not isinstance(servers, dict):
         raise RuntimeError("Hermes profile mcp_servers must be an object")
+    servers.pop(_LEGACY_DATACOP_MCP_SERVER_NAME, None)
     servers[DATACOP_MCP_SERVER_NAME] = copy.deepcopy(server_config)
     updated["mcp_servers"] = servers
     return updated
