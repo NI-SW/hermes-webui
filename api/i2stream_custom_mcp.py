@@ -46,14 +46,6 @@ _FORBIDDEN_HEADER_NAMES = frozenset(
         "upgrade",
     }
 )
-_RESERVED_SERVER_NAMES = frozenset(
-    {
-        "datacop",
-        "i2stream-knowledge-mcp",
-        "i2up-rag-service-mcp",
-    }
-)
-_RESERVED_SERVER_PREFIXES = ("i2up-stream-mcp-", "i2up-console-mcp-")
 _CUSTOM_MCP_APPLY_LOCK = threading.Lock()
 
 
@@ -62,9 +54,24 @@ def validate_server_name(value: object) -> str:
         raise ValueError(
             "MCP 服务名称必须为 1 至 64 位字母、数字、点、下划线或连字符，且以字母或数字开头"
         )
-    if value in _RESERVED_SERVER_NAMES or value.startswith(_RESERVED_SERVER_PREFIXES):
-        raise ValueError(f"MCP 服务名称 {value!r} 已由系统保留")
     return value
+
+
+def ensure_server_name_available(server_name: str) -> None:
+    for profile in CUSTOM_MCP_PROFILES:
+        try:
+            profile_home = Path(get_hermes_home_for_profile(profile))
+        except Exception:
+            continue
+        if profile != "default" and not profile_home.is_dir():
+            continue
+        config_path = profile_home / "config.yaml"
+        if not config_path.exists():
+            continue
+        current = _load_profile_config_strict(config_path)
+        servers = current.get("mcp_servers")
+        if isinstance(servers, dict) and server_name in servers:
+            raise ValueError(f"MCP 服务名称 {server_name!r} 已存在，请更换名称")
 
 
 def normalize_mcp_url(value: object) -> str:
@@ -178,6 +185,8 @@ def check_custom_mcp_connection(
     name, url, validated_headers = validate_custom_mcp_request(
         server_name, mcp_url, headers
     )
+    with profile_config_lock:
+        ensure_server_name_available(name)
     try:
         tools = probe_mcp_server(name, _server_config(url, validated_headers))
     except Exception:
@@ -205,6 +214,8 @@ def _config_with_custom_server(
         servers = {}
     if not isinstance(servers, dict):
         raise RuntimeError("Hermes profile mcp_servers must be an object")
+    if server_name in servers:
+        raise ValueError(f"MCP 服务名称 {server_name!r} 已存在，请更换名称")
     servers[server_name] = copy.deepcopy(server_config)
     updated["mcp_servers"] = servers
     return updated

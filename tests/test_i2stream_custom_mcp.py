@@ -8,7 +8,20 @@ from pathlib import Path
 import pytest
 
 
-@pytest.mark.parametrize("name", ["custom", "vendor.mcp_1", "A-b", "a" * 64])
+@pytest.mark.parametrize(
+    "name",
+    [
+        "custom",
+        "vendor.mcp_1",
+        "A-b",
+        "a" * 64,
+        "datacop",
+        "i2stream-knowledge-mcp",
+        "i2up-rag-service-mcp",
+        "i2up-stream-mcp-50-19",
+        "i2up-console-mcp-50-19",
+    ],
+)
 def test_validate_custom_mcp_name_accepts_supported_names(name):
     from api.i2stream_custom_mcp import validate_server_name
 
@@ -22,18 +35,59 @@ def test_validate_custom_mcp_name_accepts_supported_names(name):
         "-bad",
         "bad name",
         "a" * 65,
-        "i2stream-knowledge-mcp",
-        "i2up-rag-service-mcp",
-        "datacop",
-        "i2up-stream-mcp-50-19",
-        "i2up-console-mcp-demo",
     ],
 )
-def test_validate_custom_mcp_name_rejects_invalid_or_reserved_names(name):
+def test_validate_custom_mcp_name_rejects_invalid_names(name):
     from api.i2stream_custom_mcp import validate_server_name
 
     with pytest.raises(ValueError):
         validate_server_name(name)
+
+
+def test_check_custom_mcp_connection_rejects_duplicate_server_name(
+    monkeypatch, tmp_path
+):
+    from api import i2stream_custom_mcp
+
+    homes = {"default": tmp_path / "default", "stream-qa": tmp_path / "stream-qa"}
+    for profile, home in homes.items():
+        home.mkdir()
+        config_path = home / "config.yaml"
+        config_path.write_text(
+            "mcp_servers:\n  existing-mcp:\n    url: http://existing.test/mcp\n",
+            encoding="utf-8",
+        )
+    monkeypatch.setattr(
+        i2stream_custom_mcp, "get_hermes_home_for_profile", lambda profile: homes[profile]
+    )
+
+    with pytest.raises(ValueError, match="MCP 服务名称 'existing-mcp' 已存在，请更换名称"):
+        i2stream_custom_mcp.check_custom_mcp_connection(
+            "existing-mcp", "http://mcp.test/mcp", {}
+        )
+
+
+def test_configure_custom_mcp_profiles_rejects_duplicate_server_name(
+    monkeypatch, tmp_path
+):
+    from api import i2stream_custom_mcp
+
+    homes = {"default": tmp_path / "default", "stream-qa": tmp_path / "stream-qa"}
+    for profile, home in homes.items():
+        home.mkdir()
+        config_path = home / "config.yaml"
+        config_path.write_text(
+            "mcp_servers:\n  existing-mcp:\n    url: http://existing.test/mcp\n",
+            encoding="utf-8",
+        )
+    monkeypatch.setattr(
+        i2stream_custom_mcp, "get_hermes_home_for_profile", lambda profile: homes[profile]
+    )
+
+    with pytest.raises(ValueError, match="MCP 服务名称 'existing-mcp' 已存在，请更换名称"):
+        i2stream_custom_mcp.configure_custom_mcp_profiles(
+            "existing-mcp", "http://mcp.test/mcp", {}
+        )
 
 
 @pytest.mark.parametrize(
