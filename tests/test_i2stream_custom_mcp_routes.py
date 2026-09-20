@@ -126,3 +126,109 @@ def test_custom_mcp_routes_dispatch_after_security_guards(
 
     assert handled is True
     target.assert_called_once_with(handler, BODY)
+
+
+def test_custom_mcp_list_and_delete_require_auth(monkeypatch):
+    from api import routes
+
+    monkeypatch.setattr("api.auth.is_auth_enabled", lambda: False)
+
+    handler_list = MagicMock()
+    routes._handle_i2stream_custom_mcp_list(handler_list)
+    assert handler_list.send_response.call_args.args[0] == 503
+
+    handler_del = MagicMock()
+    routes._handle_i2stream_custom_mcp_delete(handler_del, "srv")
+    assert handler_del.send_response.call_args.args[0] == 503
+
+
+def test_custom_mcp_list_success(monkeypatch):
+    from api import routes
+
+    monkeypatch.setattr("api.auth.is_auth_enabled", lambda: True)
+    expected = [
+        {"server_name": "srv1", "mcp_url": "http://srv1:8000/mcp", "has_headers": False, "enabled": True}
+    ]
+    monkeypatch.setattr("api.i2stream_custom_mcp.list_custom_mcp_servers", lambda: expected)
+
+    handler = MagicMock()
+    routes._handle_i2stream_custom_mcp_list(handler)
+
+    payload = _response_json(handler)
+    assert payload == {"code": 0, "status": "success", "servers": expected}
+
+
+def test_custom_mcp_delete_success(monkeypatch):
+    from api import routes
+
+    monkeypatch.setattr("api.auth.is_auth_enabled", lambda: True)
+    delete_mock = MagicMock(return_value={"server_name": "srv1", "gateway_restart": {"status": "completed"}})
+    monkeypatch.setattr("api.i2stream_custom_mcp.remove_custom_mcp_configuration", delete_mock)
+
+    handler = MagicMock()
+    routes._handle_i2stream_custom_mcp_delete(handler, "srv1")
+
+    delete_mock.assert_called_once_with("srv1")
+    payload = _response_json(handler)
+    assert payload["code"] == 0
+    assert payload["status"] == "success"
+    assert payload["mcp"]["server_name"] == "srv1"
+
+
+def test_custom_mcp_delete_not_found_returns_404(monkeypatch):
+    from api import routes
+
+    monkeypatch.setattr("api.auth.is_auth_enabled", lambda: True)
+
+    def fake_remove(name):
+        raise ValueError(f"MCP 服务 {name!r} 不存在")
+
+    monkeypatch.setattr("api.i2stream_custom_mcp.remove_custom_mcp_configuration", fake_remove)
+
+    handler = MagicMock()
+    routes._handle_i2stream_custom_mcp_delete(handler, "missing")
+
+    assert handler.send_response.call_args.args[0] == 404
+    payload = _response_json(handler)
+    assert "不存在" in payload["error"]
+
+
+def test_custom_mcp_get_route_dispatch(monkeypatch):
+    from api import routes
+
+    handler = MagicMock()
+    target = MagicMock(return_value=True)
+    monkeypatch.setattr(
+        routes, "_guard_request_session_visibility", lambda *_args, **_kwargs: True
+    )
+    monkeypatch.setattr(routes, "_handle_i2stream_custom_mcp_list", target)
+
+    handled = routes.handle_get(handler, urlparse("/api/custom-mcp"))
+
+    assert handled is True
+    target.assert_called_once_with(handler)
+
+
+def test_custom_mcp_delete_route_dispatch(monkeypatch):
+    from api import routes
+
+    handler = MagicMock()
+    target = MagicMock(return_value=True)
+    monkeypatch.setattr(
+        "api.i2stream_console.handle_proxy", lambda *_args, **_kwargs: False
+    )
+    monkeypatch.setattr(
+        routes, "_handle_extension_sidecar_proxy", lambda *_args, **_kwargs: False
+    )
+    monkeypatch.setattr(
+        routes, "_guard_request_session_visibility", lambda *_args, **_kwargs: True
+    )
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "read_body", lambda _handler: {})
+    monkeypatch.setattr(routes, "_handle_i2stream_custom_mcp_delete", target)
+
+    handled = routes.handle_delete(handler, urlparse("/api/custom-mcp/my-srv"))
+
+    assert handled is True
+    target.assert_called_once_with(handler, "my-srv")
+

@@ -6508,6 +6508,11 @@ main.main > .main-view:not([id="mainChat"]):not([id="mainSettings"]) .main-view-
 .i2stream-knowledge-config-fields textarea{resize:vertical;font-family:var(--font-mono);line-height:1.5;}
 .i2stream-knowledge-config-fields .i2stream-custom-mcp-headers{grid-column:1 / -1;}
 .i2stream-custom-mcp-headers small{color:var(--muted);font-size:10px;font-weight:400;line-height:1.4;}
+.i2stream-custommcp-list-card{margin-top:14px;}
+.i2stream-custommcp-title-line{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
+.i2stream-custommcp-badge{padding:2px 7px;border-radius:999px;font-size:10px;font-weight:700;letter-spacing:.02em;background:var(--accent-bg);color:var(--accent-text);}
+.i2stream-custommcp-badge.headers{background:color-mix(in srgb,var(--success) 14%,transparent);color:var(--success);}
+.i2stream-custommcp-row .i2stream-row-meta{font-family:var(--font-mono);word-break:break-all;}
 .i2stream-knowledge-config-fields input:focus-visible,.i2stream-knowledge-config-fields select:focus-visible,.i2stream-knowledge-config-fields textarea:focus-visible,.i2stream-knowledge-config-actions button:focus-visible{outline:2px solid var(--accent);outline-offset:2px;}
 .i2stream-knowledge-config-actions{display:flex;align-items:center;gap:8px;margin-top:10px;}
 .i2stream-knowledge-config-actions .i2stream-status{min-height:0;margin-left:3px;}

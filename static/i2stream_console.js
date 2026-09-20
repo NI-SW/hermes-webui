@@ -10,7 +10,7 @@ const I2STREAM_SECTIONS = new Set(['knowledge', 'datacop', 'custommcp', 'reports
 const I2STREAM_CLIENT_ID_RE = /^[A-Za-z0-9_-]{16,128}$/;
 const _i2streamState = {
   section: 'knowledge',
-  loaded: {knowledge: false, datacop: false, reports: false, history: false, nodes: false, logmonitor: true},
+  loaded: {knowledge: false, datacop: false, custommcp: false, reports: false, history: false, nodes: false, logmonitor: true},
   knowledgeFiles: [],
   knowledgeCollections: [],
   selectedKnowledgeCollection: null,
@@ -23,6 +23,8 @@ const _i2streamState = {
   datacopConfiguration: null,
   datacopConfigBusy: false,
   customMcpConfigBusy: false,
+  customMcpServers: [],
+  customMcpDeleteInFlight: false,
   reports: [],
   conversations: [],
   historyClientId: null,
@@ -30,6 +32,7 @@ const _i2streamState = {
   selectedConversationKey: null,
   selectedReportToken: null,
   knowledgeTaskGeneration: 0,
+  customMcpGeneration: 0,
   requestGeneration: {knowledge: 0, datacop: 0, reports: 0, history: 0, nodes: 0},
   historyDetailGeneration: 0,
   bindingsReady: false,
@@ -578,6 +581,56 @@ async function saveCustomMcpConfigurationRequest(payload) {
     retries: 0,
     timeoutMs: 420_000,
   }), values, true);
+}
+
+function parseCustomMcpList(value) {
+  const payload = _i2Success(value, 'custom MCP server list');
+  if (!Array.isArray(payload.servers)) {
+    throw new TypeError('custom MCP server list must be an array');
+  }
+  return payload.servers.map((item, index) => {
+    const s = _i2ContractObject(item, `custom MCP server ${index}`);
+    const name = _i2ContractString(s.server_name, `custom MCP server ${index} server_name`);
+    const url = _i2ContractString(s.mcp_url, `custom MCP server ${index} mcp_url`);
+    if (typeof s.has_headers !== 'boolean') {
+      throw new TypeError(`custom MCP server ${index} has_headers must be boolean`);
+    }
+    return {
+      server_name: name,
+      mcp_url: url,
+      has_headers: s.has_headers,
+      enabled: s.enabled !== false,
+    };
+  });
+}
+
+function parseCustomMcpDeleteResult(value, expectedName) {
+  const payload = _i2Success(value, 'custom MCP delete response');
+  const mcp = _i2ContractObject(payload.mcp, 'custom MCP delete result');
+  const serverName = _i2ContractString(mcp.server_name, 'custom MCP server_name');
+  if (serverName !== expectedName) {
+    throw new TypeError(`custom MCP delete expected ${expectedName} but got ${serverName}`);
+  }
+  const gatewayRestart = _i2ContractObject(mcp.gateway_restart, 'custom MCP gateway restart');
+  if (gatewayRestart.status !== 'completed') {
+    throw new TypeError('custom MCP gateway restart did not complete');
+  }
+  return {name: serverName};
+}
+
+async function fetchCustomMcpListRequest() {
+  return parseCustomMcpList(await api('/api/custom-mcp', {
+    method: 'GET',
+    timeoutMs: 30_000,
+  }));
+}
+
+async function deleteCustomMcpRequest(serverName) {
+  const name = _i2ContractString(serverName, 'custom MCP server name');
+  return parseCustomMcpDeleteResult(await api(`/api/custom-mcp/${encodeURIComponent(name)}`, {
+    method: 'DELETE',
+    timeoutMs: 420_000,
+  }), name);
 }
 
 function parseNodes(value) {
@@ -1418,6 +1471,7 @@ async function switchI2StreamSection(section, force = false) {
   }
   if (section === 'knowledge' && (force || !_i2streamState.loaded.knowledge)) await loadI2StreamKnowledge();
   if (section === 'datacop' && (force || !_i2streamState.loaded.datacop)) await loadI2StreamDatacop();
+  if (section === 'custommcp' && (force || !_i2streamState.loaded.custommcp)) await loadI2StreamCustomMcpList();
   if (section === 'reports' && (force || !_i2streamState.loaded.reports)) await loadI2StreamReports();
   if (section === 'nodes') await loadI2StreamNodes(true);
   if (section === 'history') {
@@ -1934,14 +1988,129 @@ async function saveI2StreamCustommcpConfig(event) {
     const applied = await saveCustomMcpConfigurationRequest(payload);
     const headersInput = document.getElementById('i2streamCustommcpHeaders');
     if (headersInput) headersInput.value = '';
+    const nameInput = document.getElementById('i2streamCustommcpServerName');
+    if (nameInput) nameInput.value = '';
+    const urlInput = document.getElementById('i2streamCustommcpUrl');
+    if (urlInput) urlInput.value = '';
     _i2SetStatus(
       'i2streamCustommcpConfigStatus',
       _i2Text('i2stream_custom_mcp_config_saved', applied.name, applied.toolCount),
     );
+    await loadI2StreamCustomMcpList(false);
   } catch (error) {
     _i2SetStatus('i2streamCustommcpConfigStatus', `${_i2Text('error_prefix')}${error.message}`, 'error');
   } finally {
     _i2SetCustomMcpConfigBusy(false);
+  }
+}
+
+function _i2RenderCustomMcpServers() {
+  const container = document.getElementById('i2streamCustommcpList');
+  if (!container) return;
+  const servers = _i2streamState.customMcpServers;
+  container.replaceChildren();
+  if (!servers.length) {
+    const empty = document.createElement('div');
+    empty.className = 'i2stream-empty';
+    empty.textContent = _i2Text('i2stream_custom_mcp_empty');
+    container.appendChild(empty);
+    return;
+  }
+
+  servers.forEach(server => {
+    const row = document.createElement('div');
+    row.className = 'i2stream-row i2stream-custommcp-row';
+
+    const main = document.createElement('div');
+    main.className = 'i2stream-row-main';
+
+    const titleLine = document.createElement('div');
+    titleLine.className = 'i2stream-custommcp-title-line';
+
+    const title = document.createElement('div');
+    title.className = 'i2stream-row-title';
+    title.textContent = server.server_name;
+    titleLine.appendChild(title);
+
+    if (server.has_headers) {
+      const headerBadge = document.createElement('span');
+      headerBadge.className = 'i2stream-custommcp-badge headers';
+      headerBadge.textContent = _i2Text('i2stream_custom_mcp_badge_headers');
+      titleLine.appendChild(headerBadge);
+    }
+
+    const meta = document.createElement('div');
+    meta.className = 'i2stream-row-meta';
+    meta.textContent = server.mcp_url;
+
+    main.append(titleLine, meta);
+
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'i2stream-action danger';
+    remove.disabled = _i2streamState.customMcpDeleteInFlight;
+    remove.textContent = _i2Text('delete_title');
+    remove.setAttribute('aria-label', _i2Text('i2stream_custom_mcp_delete_confirm', server.server_name));
+    remove.addEventListener('click', () => deleteI2StreamCustomMcpServer(server.server_name));
+
+    row.append(main, remove);
+    container.appendChild(row);
+  });
+}
+
+async function loadI2StreamCustomMcpList(announce = false) {
+  const generation = ++_i2streamState.customMcpGeneration;
+  if (announce) _i2SetStatus('i2streamCustommcpListStatus', _i2Text('loading'));
+  let loaded = false;
+  try {
+    const servers = await fetchCustomMcpListRequest();
+    if (generation !== _i2streamState.customMcpGeneration) return 'superseded';
+    _i2streamState.customMcpServers = servers;
+    _i2streamState.loaded.custommcp = true;
+    loaded = true;
+    _i2RenderCustomMcpServers();
+    if (announce) _i2SetStatus('i2streamCustommcpListStatus', '');
+  } catch (error) {
+    if (generation !== _i2streamState.customMcpGeneration) return 'superseded';
+    _i2SetStatus('i2streamCustommcpListStatus', `${_i2Text('error_prefix')}${error.message}`, 'error');
+  }
+  return loaded ? 'success' : 'failed';
+}
+
+async function deleteI2StreamCustomMcpServer(serverName) {
+  if (_i2streamState.customMcpDeleteInFlight) return;
+  const confirmed = await showConfirmDialog({
+    title: _i2Text('i2stream_custom_mcp_delete_confirm', serverName),
+    message: _i2Text('i2stream_custom_mcp_delete_warning'),
+    confirmLabel: _i2Text('delete_title'),
+    danger: true,
+    focusCancel: true,
+  });
+  if (!confirmed) return;
+
+  await new Promise(resolve => setTimeout(resolve, 0));
+  _i2streamState.customMcpDeleteInFlight = true;
+  document.querySelectorAll('#i2streamCustommcpList .i2stream-action.danger').forEach(button => {
+    button.disabled = true;
+  });
+  _i2SetStatus('i2streamCustommcpListStatus', _i2Text('i2stream_custom_mcp_deleting', serverName));
+  try {
+    await deleteCustomMcpRequest(serverName);
+    _i2streamState.customMcpDeleteInFlight = false;
+    const refreshed = await loadI2StreamCustomMcpList(false);
+    if (refreshed === 'success') {
+      _i2SetStatus('i2streamCustommcpListStatus', _i2Text('i2stream_custom_mcp_deleted', serverName));
+    } else {
+      _i2SetStatus(
+        'i2streamCustommcpListStatus',
+        _i2Text('i2stream_custom_mcp_deleted_refresh_failed', serverName),
+        'error',
+      );
+    }
+  } catch (error) {
+    _i2streamState.customMcpDeleteInFlight = false;
+    _i2RenderCustomMcpServers();
+    _i2SetStatus('i2streamCustommcpListStatus', `${_i2Text('error_prefix')}${error.message}`, 'error');
   }
 }
 
@@ -2509,6 +2678,12 @@ window.__i2streamConsoleTest = {
   parseCustomMcpResult,
   checkCustomMcpConnectionRequest,
   saveCustomMcpConfigurationRequest,
+  parseCustomMcpList,
+  parseCustomMcpDeleteResult,
+  fetchCustomMcpListRequest,
+  deleteCustomMcpRequest,
+  loadI2StreamCustomMcpList,
+  deleteI2StreamCustomMcpServer,
   reconcileKnowledgeSelection,
   deleteKnowledgeFiles: _i2DeleteKnowledgeFiles,
   parseReports,

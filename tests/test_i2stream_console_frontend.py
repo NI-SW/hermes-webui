@@ -393,6 +393,78 @@ output = {calls, checked, applied, withoutHeaders, rejectedHeaders, mismatchReje
     assert "opaque-secret" not in json.dumps(result["applied"])
 
 
+def test_custom_mcp_view_exposes_configured_servers_list_card():
+    config_index = INDEX.index('id="i2streamCustommcpConfig"')
+    list_index = INDEX.index('id="i2streamCustommcpList"')
+    assert config_index < list_index
+    assert 'id="i2streamCustommcpListStatus"' in INDEX
+    assert 'class="i2stream-knowledge-config i2stream-custommcp-list-card"' in INDEX
+    source = MODULE_PATH.read_text(encoding="utf-8")
+    assert "loadI2StreamCustomMcpList" in source
+    assert "deleteI2StreamCustomMcpServer" in source
+    assert "fetchCustomMcpListRequest" in source
+    assert "deleteCustomMcpRequest" in source
+
+
+def test_custom_mcp_frontend_contract_handles_list_and_delete():
+    result = _run_contract_case(
+        """
+const calls = [];
+sandbox.api = async (url, options) => {
+  calls.push({url, method: options.method, timeoutMs: options.timeoutMs});
+  if (options.method === 'GET') {
+    return {
+      code: 0,
+      status: 'success',
+      servers: [
+        {server_name: 'alpha', mcp_url: 'http://alpha.test/mcp', has_headers: true, enabled: true},
+        {server_name: 'beta', mcp_url: 'http://beta.test/mcp', has_headers: false, enabled: false}
+      ]
+    };
+  }
+  if (options.method === 'DELETE') {
+    return {
+      code: 0,
+      status: 'success',
+      mcp: {
+        server_name: 'alpha',
+        gateway_restart: {status: 'completed', profiles: ['default']}
+      }
+    };
+  }
+};
+const list = await c.fetchCustomMcpListRequest();
+const deleted = await c.deleteCustomMcpRequest('alpha');
+
+let malformedListRejected = false;
+sandbox.api = async () => ({code: 0, status: 'success', servers: 'not-an-array'});
+try { await c.fetchCustomMcpListRequest(); } catch (e) { malformedListRejected = e.name === 'TypeError'; }
+
+let deleteRestartIncompleteRejected = false;
+sandbox.api = async () => ({
+  code: 0, status: 'success',
+  mcp: {server_name: 'alpha', gateway_restart: {status: 'failed'}}
+});
+try { await c.deleteCustomMcpRequest('alpha'); } catch (e) { deleteRestartIncompleteRejected = e.name === 'TypeError'; }
+
+output = {calls, list, deleted, malformedListRejected, deleteRestartIncompleteRejected};
+"""
+    )
+
+    assert result["calls"] == [
+        {"url": "/api/custom-mcp", "method": "GET", "timeoutMs": 30_000},
+        {"url": "/api/custom-mcp/alpha", "method": "DELETE", "timeoutMs": 420_000},
+    ]
+    assert result["list"] == [
+        {"server_name": "alpha", "mcp_url": "http://alpha.test/mcp", "has_headers": True, "enabled": True},
+        {"server_name": "beta", "mcp_url": "http://beta.test/mcp", "has_headers": False, "enabled": False},
+    ]
+    assert result["deleted"] == {"name": "alpha"}
+    assert result["malformedListRejected"] is True
+    assert result["deleteRestartIncompleteRejected"] is True
+
+
+
 def test_knowledge_view_exposes_collection_selector_and_creator_before_upload():
     collection_index = INDEX.index('id="i2streamKnowledgeCollections"')
     upload_index = INDEX.index('id="i2streamKnowledgeUpload"')

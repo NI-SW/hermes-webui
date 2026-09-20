@@ -13313,6 +13313,8 @@ def handle_get(handler, parsed) -> bool:
 
     if parsed.path == "/api/datacop-mcp":
         return _handle_i2stream_datacop_mcp_get(handler)
+    if parsed.path == "/api/custom-mcp":
+        return _handle_i2stream_custom_mcp_list(handler)
 
     # ── Insights / knowledge status ──
     if parsed.path == "/api/insights":
@@ -17971,6 +17973,9 @@ def handle_delete(handler, parsed) -> bool:
     if parsed.path.startswith("/api/mcp/servers/"):
         name = parsed.path[len("/api/mcp/servers/"):]
         return _handle_mcp_server_delete(handler, name)
+    if parsed.path.startswith("/api/custom-mcp/"):
+        name = parsed.path[len("/api/custom-mcp/"):]
+        return _handle_i2stream_custom_mcp_delete(handler, name)
     if parsed.path == "/api/prompts":
         pid = str(body.get("id") or "").strip()
         if not pid:
@@ -29891,3 +29896,39 @@ def _handle_i2stream_custom_mcp_update(handler, body):
         logger.error("Failed to update custom MCP profile configuration: %s", exc)
         return bad(handler, str(exc), status=500)
     return j(handler, {"code": 0, "status": "success", "mcp": result})
+
+
+def _handle_i2stream_custom_mcp_list(handler):
+    if not _require_custom_mcp_configuration_auth(handler):
+        return True
+    from api.i2stream_custom_mcp import list_custom_mcp_servers
+
+    try:
+        servers = list_custom_mcp_servers()
+    except Exception as exc:
+        logger.error("Failed to list custom MCP servers: %s", exc)
+        return bad(handler, str(exc), status=500)
+    return j(handler, {"code": 0, "status": "success", "servers": servers})
+
+
+def _handle_i2stream_custom_mcp_delete(handler, name):
+    from urllib.parse import unquote
+
+    if not _require_custom_mcp_configuration_auth(handler):
+        return True
+    name = unquote(name).strip()
+    if not name:
+        return bad(handler, "MCP server name is required")
+
+    from api.i2stream_custom_mcp import remove_custom_mcp_configuration
+
+    try:
+        result = remove_custom_mcp_configuration(name)
+    except ValueError as exc:
+        status = 404 if "不存在" in str(exc) else 400
+        return bad(handler, str(exc), status=status)
+    except RuntimeError as exc:
+        logger.error("Failed to delete custom MCP server %r: %s", name, exc)
+        return bad(handler, str(exc), status=500)
+    return j(handler, {"code": 0, "status": "success", "mcp": result})
+
