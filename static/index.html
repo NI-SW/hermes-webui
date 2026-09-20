@@ -365,6 +365,10 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7.5 12 3l8 4.5-8 4.5-8-4.5Z"/><path d="m4 12 8 4.5 8-4.5M4 16.5 12 21l8-4.5"/></svg>
           <span data-i18n="i2stream_datacop">DataCop MCP</span>
         </button>
+        <button type="button" class="side-menu-item" id="i2streamCustommcpTab" role="tab" tabindex="-1" aria-selected="false" aria-controls="i2streamCustommcpPage" data-i2stream-section="custommcp" onclick="switchI2StreamSection('custommcp')">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 8h8v8H8z"/><path d="M3 10h5m8 0h5M3 14h5m8 0h5M10 3v5m4-5v5m-4 8v5m4-5v5"/></svg>
+          <span data-i18n="i2stream_custom_mcp">Custom MCP</span>
+        </button>
         <button type="button" class="side-menu-item" id="i2streamReportsTab" role="tab" tabindex="-1" aria-selected="false" aria-controls="i2streamReportsPage" data-i2stream-section="reports" onclick="switchI2StreamSection('reports')">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M8 13h8M8 17h5"/></svg>
           <span data-i18n="i2stream_reports">Reports</span>
@@ -1047,6 +1051,26 @@
               <button class="sm-btn" type="button" id="i2streamDatacopConfigCheckBtn" onclick="checkI2StreamDatacopConfig()" data-i18n="i2stream_datacop_config_check" disabled>Check connection</button>
               <button class="sm-btn" type="submit" id="i2streamDatacopConfigSaveBtn" data-i18n="i2stream_datacop_config_save" disabled>Save and apply</button>
               <span class="i2stream-status" id="i2streamDatacopConfigStatus" role="status" aria-live="polite"></span>
+            </div>
+          </form>
+        </section>
+        <section class="i2stream-page" id="i2streamCustommcpPage" role="tabpanel" data-i2stream-page="custommcp" aria-labelledby="i2streamCustommcpTab" hidden>
+          <form class="i2stream-knowledge-config" id="i2streamCustommcpConfig" onsubmit="saveI2StreamCustommcpConfig(event)" autocomplete="off">
+            <div class="i2stream-knowledge-config-head">
+              <div>
+                <strong data-i18n="i2stream_custom_mcp_config_title">Custom MCP server</strong>
+                <span data-i18n="i2stream_custom_mcp_config_hint">Connect a remote MCP server and make its tools available to Hermes Agent.</span>
+              </div>
+            </div>
+            <div class="i2stream-knowledge-config-fields">
+              <label><span data-i18n="i2stream_custom_mcp_server_name">Server name</span><input id="i2streamCustommcpServerName" name="server_name" type="text" required maxlength="64" spellcheck="false" autocomplete="off" data-i18n-placeholder="i2stream_custom_mcp_server_name_placeholder" placeholder="private-tools"></label>
+              <label><span data-i18n="i2stream_custom_mcp_url">MCP URL</span><input id="i2streamCustommcpUrl" name="mcp_url" type="url" required spellcheck="false" autocomplete="off" placeholder="https://mcp.example.com/mcp"></label>
+              <label class="i2stream-custom-mcp-headers"><span data-i18n="i2stream_custom_mcp_headers">Request headers (JSON)</span><textarea id="i2streamCustommcpHeaders" name="headers" rows="6" autocomplete="off" spellcheck="false" data-i18n-placeholder="i2stream_custom_mcp_headers_placeholder" placeholder='{"Authorization":"Bearer …","X-Tenant":"acme"}'></textarea><small data-i18n="i2stream_custom_mcp_headers_hint">Optional. Enter a JSON object whose keys and values are strings.</small></label>
+            </div>
+            <div class="i2stream-knowledge-config-actions">
+              <button class="sm-btn" type="button" id="i2streamCustommcpConfigCheckBtn" onclick="checkI2StreamCustommcpConfig()" data-i18n="i2stream_custom_mcp_config_check">Check connection</button>
+              <button class="sm-btn" type="submit" id="i2streamCustommcpConfigSaveBtn" data-i18n="i2stream_custom_mcp_config_save">Save and apply</button>
+              <span class="i2stream-status" id="i2streamCustommcpConfigStatus" role="status" aria-live="polite"></span>
             </div>
           </form>
         </section>

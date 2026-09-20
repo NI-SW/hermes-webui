@@ -15211,6 +15211,8 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/datacop-mcp/check":
         return _handle_i2stream_datacop_mcp_check(handler, body)
+    if parsed.path == "/api/custom-mcp/check":
+        return _handle_i2stream_custom_mcp_check(handler, body)
 
     if parsed.path == "/api/escape/authorize":
         return _handle_escape_authorize(handler, parsed, body)
@@ -18009,6 +18011,8 @@ def handle_put(handler, parsed) -> bool:
         return True
     if parsed.path == "/api/datacop-mcp":
         return _handle_i2stream_datacop_mcp_update(handler, body)
+    if parsed.path == "/api/custom-mcp":
+        return _handle_i2stream_custom_mcp_update(handler, body)
     if parsed.path == "/api/rag-service-mcp":
         return _handle_i2stream_rag_mcp_update(handler, body)
     if parsed.path.startswith("/api/mcp/servers/"):
@@ -29812,5 +29816,78 @@ def _handle_i2stream_datacop_mcp_update(handler, body):
             "Failed to update i2Stream DataCop MCP profile configuration: %s",
             exc,
         )
+        return bad(handler, str(exc), status=500)
+    return j(handler, {"code": 0, "status": "success", "mcp": result})
+
+
+_CUSTOM_MCP_REQUEST_FIELDS = {
+    "server_name",
+    "mcp_url",
+    "headers",
+}
+
+
+def _require_custom_mcp_configuration_auth(handler) -> bool:
+    """Require WebUI login protection before managing custom MCP credentials."""
+    from api.auth import is_auth_enabled
+
+    if is_auth_enabled():
+        return True
+    bad(handler, "启用 WebUI 登录保护后才能管理自定义 MCP 配置", status=503)
+    return False
+
+
+def _valid_custom_mcp_request_body(handler, body) -> bool:
+    if isinstance(body, dict) and set(body) == _CUSTOM_MCP_REQUEST_FIELDS:
+        return True
+    bad(
+        handler,
+        "server_name, mcp_url and headers are required and must be the only fields",
+    )
+    return False
+
+
+def _handle_i2stream_custom_mcp_check(handler, body):
+    """Probe a submitted custom HTTP MCP server without persisting credentials."""
+    if not _require_custom_mcp_configuration_auth(handler):
+        return True
+    if not _valid_custom_mcp_request_body(handler, body):
+        return True
+
+    from api.i2stream_custom_mcp import check_custom_mcp_connection
+
+    try:
+        result = check_custom_mcp_connection(
+            body["server_name"],
+            body["mcp_url"],
+            body["headers"],
+        )
+    except ValueError as exc:
+        return bad(handler, str(exc))
+    except RuntimeError as exc:
+        logger.warning("Custom MCP connection check failed: %s", exc)
+        return bad(handler, str(exc), status=502)
+    return j(handler, {"code": 0, "status": "success", "mcp": result})
+
+
+def _handle_i2stream_custom_mcp_update(handler, body):
+    """Configure a custom HTTP MCP server and activate managed gateways."""
+    if not _require_custom_mcp_configuration_auth(handler):
+        return True
+    if not _valid_custom_mcp_request_body(handler, body):
+        return True
+
+    from api.i2stream_custom_mcp import apply_custom_mcp_configuration
+
+    try:
+        result = apply_custom_mcp_configuration(
+            body["server_name"],
+            body["mcp_url"],
+            body["headers"],
+        )
+    except ValueError as exc:
+        return bad(handler, str(exc))
+    except RuntimeError as exc:
+        logger.error("Failed to update custom MCP profile configuration: %s", exc)
         return bad(handler, str(exc), status=500)
     return j(handler, {"code": 0, "status": "success", "mcp": result})

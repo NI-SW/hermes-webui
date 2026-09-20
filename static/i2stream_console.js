@@ -6,7 +6,7 @@ const I2STREAM_HISTORY_PAGE_SIZE = 30;
 const I2STREAM_NODES_POLL_INTERVAL_MS = 30_000;
 const I2STREAM_INSTALL_POLL_INTERVAL_MS = 2_000;
 const I2STREAM_PRIVATE_KEY_MAX_BYTES = 16 * 1024;
-const I2STREAM_SECTIONS = new Set(['knowledge', 'datacop', 'reports', 'history', 'nodes', 'logmonitor']);
+const I2STREAM_SECTIONS = new Set(['knowledge', 'datacop', 'custommcp', 'reports', 'history', 'nodes', 'logmonitor']);
 const I2STREAM_CLIENT_ID_RE = /^[A-Za-z0-9_-]{16,128}$/;
 const _i2streamState = {
   section: 'knowledge',
@@ -22,6 +22,7 @@ const _i2streamState = {
   knowledgeDeleteInFlight: false,
   datacopConfiguration: null,
   datacopConfigBusy: false,
+  customMcpConfigBusy: false,
   reports: [],
   conversations: [],
   historyClientId: null,
@@ -448,6 +449,135 @@ async function saveDatacopConfigurationRequest(payload) {
     retries: 0,
     timeoutMs: 420_000,
   }));
+}
+
+function normalizeCustomMcpConfiguration(raw) {
+  const values = _i2ContractObject(raw, 'custom MCP configuration form');
+  const serverName = _i2ContractString(values.server_name, 'custom MCP server_name');
+  const mcpUrl = _i2ContractString(values.mcp_url, 'custom MCP mcp_url');
+  const headers = _i2NormalizeCustomMcpHeaders(values.headers);
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(serverName)) {
+    throw new TypeError(_i2Text('i2stream_custom_mcp_config_invalid'));
+  }
+  if (mcpUrl !== mcpUrl.trim() || /\s/.test(mcpUrl)) {
+    throw new TypeError(_i2Text('i2stream_custom_mcp_config_invalid'));
+  }
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(mcpUrl);
+  } catch {
+    throw new TypeError(_i2Text('i2stream_custom_mcp_config_invalid'));
+  }
+  if (!['http:', 'https:'].includes(parsedUrl.protocol) || !parsedUrl.hostname ||
+      parsedUrl.username || parsedUrl.password || parsedUrl.search || parsedUrl.hash) {
+    throw new TypeError(_i2Text('i2stream_custom_mcp_config_invalid'));
+  }
+  return {
+    server_name: serverName,
+    mcp_url: mcpUrl,
+    headers,
+  };
+}
+
+const _I2_CUSTOM_MCP_FORBIDDEN_HEADERS = new Set([
+  'host',
+  'content-length',
+  'transfer-encoding',
+  'connection',
+  'upgrade',
+  'proxy-connection',
+  'keep-alive',
+  'te',
+  'trailer',
+]);
+
+function _i2NormalizeCustomMcpHeaders(raw) {
+  let parsed = raw;
+  if (typeof raw === 'string') {
+    if (!raw.trim()) return {};
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      throw new TypeError(_i2Text('i2stream_custom_mcp_headers_invalid'));
+    }
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new TypeError(_i2Text('i2stream_custom_mcp_headers_invalid'));
+  }
+  const entries = Object.entries(parsed);
+  if (entries.length > 64) {
+    throw new TypeError(_i2Text('i2stream_custom_mcp_headers_invalid'));
+  }
+  const normalizedNames = new Set();
+  for (const [name, value] of entries) {
+    const normalizedName = name.toLowerCase();
+    if (name.length > 256 || !/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(name) ||
+        normalizedNames.has(normalizedName) ||
+        _I2_CUSTOM_MCP_FORBIDDEN_HEADERS.has(normalizedName) ||
+        typeof value !== 'string' || value.length > 8192 ||
+        /[\u0000-\u001F\u007F]/.test(value)) {
+      throw new TypeError(_i2Text('i2stream_custom_mcp_headers_invalid'));
+    }
+    normalizedNames.add(normalizedName);
+  }
+  return Object.fromEntries(entries);
+}
+
+function _i2CustomMcpComparableUrl(value, label) {
+  const raw = _i2ContractString(value, label);
+  try {
+    return new URL(raw).href;
+  } catch {
+    throw new TypeError(`${label} must be a valid URL`);
+  }
+}
+
+function parseCustomMcpResult(value, expected, applying = false) {
+  const payload = _i2Success(value, applying ? 'custom MCP configuration apply' : 'custom MCP connection check');
+  const mcp = _i2ContractObject(payload.mcp, 'custom MCP result');
+  const serverName = _i2ContractString(mcp.server_name, 'custom MCP server_name');
+  const mcpUrl = _i2ContractString(mcp.mcp_url, 'custom MCP mcp_url');
+  if (typeof mcp.has_headers !== 'boolean') {
+    throw new TypeError('custom MCP header state is invalid');
+  }
+  const toolCount = _i2NonNegativeSafeInteger(mcp.tool_count, 'custom MCP tool_count');
+  if (toolCount === 0) throw new TypeError('custom MCP must publish at least one tool');
+  if (serverName !== expected.server_name ||
+      mcp.has_headers !== (Object.keys(expected.headers).length > 0) ||
+      _i2CustomMcpComparableUrl(mcpUrl, 'custom MCP result URL') !==
+        _i2CustomMcpComparableUrl(expected.mcp_url, 'custom MCP requested URL')) {
+    throw new TypeError('custom MCP result does not match the request');
+  }
+  if (applying) {
+    if (mcp.reload_required !== false) {
+      throw new TypeError('custom MCP configuration must be active after save');
+    }
+    const gatewayRestart = _i2ContractObject(mcp.gateway_restart, 'custom MCP gateway restart');
+    if (gatewayRestart.status !== 'completed') {
+      throw new TypeError('custom MCP gateway restart did not complete');
+    }
+  }
+  return {name: serverName, url: mcpUrl, hasHeaders: mcp.has_headers, toolCount};
+}
+
+async function checkCustomMcpConnectionRequest(payload) {
+  const values = normalizeCustomMcpConfiguration(payload);
+  return parseCustomMcpResult(await api('/api/custom-mcp/check', {
+    method: 'POST',
+    body: JSON.stringify(values),
+    retries: 0,
+    timeoutMs: 90_000,
+  }), values);
+}
+
+async function saveCustomMcpConfigurationRequest(payload) {
+  const values = normalizeCustomMcpConfiguration(payload);
+  return parseCustomMcpResult(await api('/api/custom-mcp', {
+    method: 'PUT',
+    body: JSON.stringify(values),
+    retries: 0,
+    timeoutMs: 420_000,
+  }), values, true);
 }
 
 function parseNodes(value) {
@@ -1201,6 +1331,14 @@ function _i2EnsureBindings() {
       }
     });
   }
+  const customMcpForm = document.getElementById('i2streamCustommcpConfig');
+  if (customMcpForm) {
+    customMcpForm.addEventListener('input', () => {
+      if (!_i2streamState.customMcpConfigBusy) {
+        _i2SetStatus('i2streamCustommcpConfigStatus', '');
+      }
+    });
+  }
   _i2streamState.bindingsReady = true;
 }
 
@@ -1241,7 +1379,7 @@ async function switchI2StreamSection(section, force = false) {
   });
   const title = document.getElementById('i2streamMainTitle');
   if (title) {
-    const key = {knowledge:'i2stream_knowledge',datacop:'i2stream_datacop',reports:'i2stream_reports',history:'i2stream_history',nodes:'i2stream_nodes',logmonitor:'i2stream_logmonitor'}[section];
+    const key = {knowledge:'i2stream_knowledge',datacop:'i2stream_datacop',custommcp:'i2stream_custom_mcp',reports:'i2stream_reports',history:'i2stream_history',nodes:'i2stream_nodes',logmonitor:'i2stream_logmonitor'}[section];
     title.dataset.i18n = key;
     title.textContent = _i2Text(key);
   }
@@ -1257,7 +1395,9 @@ async function switchI2StreamSection(section, force = false) {
         ? 'i2stream_logmonitor_explainer'
         : (section === 'datacop'
           ? 'i2stream_datacop_explainer'
-          : (scoped ? 'i2stream_client_explainer' : 'i2stream_global_explainer')));
+          : (section === 'custommcp'
+            ? 'i2stream_custom_mcp_explainer'
+            : (scoped ? 'i2stream_client_explainer' : 'i2stream_global_explainer'))));
     scopeExplainer.dataset.i18n = key;
     scopeExplainer.textContent = _i2Text(key);
   }
@@ -1735,6 +1875,73 @@ async function saveI2StreamDatacopConfig(event) {
     _i2SetStatus('i2streamDatacopConfigStatus', `${_i2Text('error_prefix')}${error.message}`, 'error');
   } finally {
     _i2SetDatacopConfigBusy(false);
+  }
+}
+
+function _i2CustomMcpPayload() {
+  const form = document.getElementById('i2streamCustommcpConfig');
+  if (!form || !form.reportValidity()) {
+    throw new TypeError(_i2Text('i2stream_custom_mcp_config_invalid'));
+  }
+  const values = {};
+  new FormData(form).forEach((value, key) => { values[key] = value; });
+  return normalizeCustomMcpConfiguration(values);
+}
+
+function _i2SetCustomMcpConfigBusy(busy) {
+  _i2streamState.customMcpConfigBusy = busy;
+  const form = document.getElementById('i2streamCustommcpConfig');
+  if (form) form.querySelectorAll('input, textarea, button').forEach(control => {
+    control.disabled = busy;
+  });
+}
+
+async function checkI2StreamCustommcpConfig() {
+  let payload;
+  try {
+    payload = _i2CustomMcpPayload();
+  } catch (error) {
+    _i2SetStatus('i2streamCustommcpConfigStatus', error.message, 'error');
+    return;
+  }
+  _i2SetCustomMcpConfigBusy(true);
+  _i2SetStatus('i2streamCustommcpConfigStatus', _i2Text('i2stream_custom_mcp_config_checking'));
+  try {
+    const checked = await checkCustomMcpConnectionRequest(payload);
+    _i2SetStatus(
+      'i2streamCustommcpConfigStatus',
+      _i2Text('i2stream_custom_mcp_config_check_passed', checked.toolCount),
+    );
+  } catch (error) {
+    _i2SetStatus('i2streamCustommcpConfigStatus', `${_i2Text('error_prefix')}${error.message}`, 'error');
+  } finally {
+    _i2SetCustomMcpConfigBusy(false);
+  }
+}
+
+async function saveI2StreamCustommcpConfig(event) {
+  event.preventDefault();
+  let payload;
+  try {
+    payload = _i2CustomMcpPayload();
+  } catch (error) {
+    _i2SetStatus('i2streamCustommcpConfigStatus', error.message, 'error');
+    return;
+  }
+  _i2SetCustomMcpConfigBusy(true);
+  _i2SetStatus('i2streamCustommcpConfigStatus', _i2Text('i2stream_custom_mcp_config_saving'));
+  try {
+    const applied = await saveCustomMcpConfigurationRequest(payload);
+    const headersInput = document.getElementById('i2streamCustommcpHeaders');
+    if (headersInput) headersInput.value = '';
+    _i2SetStatus(
+      'i2streamCustommcpConfigStatus',
+      _i2Text('i2stream_custom_mcp_config_saved', applied.name, applied.toolCount),
+    );
+  } catch (error) {
+    _i2SetStatus('i2streamCustommcpConfigStatus', `${_i2Text('error_prefix')}${error.message}`, 'error');
+  } finally {
+    _i2SetCustomMcpConfigBusy(false);
   }
 }
 
@@ -2298,6 +2505,10 @@ window.__i2streamConsoleTest = {
   checkDatacopConnectionRequest,
   saveDatacopConfigurationRequest,
   loadI2StreamDatacop,
+  normalizeCustomMcpConfiguration,
+  parseCustomMcpResult,
+  checkCustomMcpConnectionRequest,
+  saveCustomMcpConfigurationRequest,
   reconcileKnowledgeSelection,
   deleteKnowledgeFiles: _i2DeleteKnowledgeFiles,
   parseReports,

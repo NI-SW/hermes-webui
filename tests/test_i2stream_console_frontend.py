@@ -56,7 +56,7 @@ def test_i2stream_has_desktop_mobile_sidebar_and_main_surfaces():
     assert INDEX.count('src="static/i2.ico?v=__WEBUI_VERSION__"') == 2
     assert 'id="panelI2stream"' in INDEX
     assert 'id="mainI2stream"' in INDEX
-    for section in ("knowledge", "datacop", "reports", "history", "nodes", "logmonitor"):
+    for section in ("knowledge", "datacop", "custommcp", "reports", "history", "nodes", "logmonitor"):
         assert f'data-i2stream-section="{section}"' in INDEX
     assert 'id="i2streamKnowledgeUpload"' in INDEX
     assert 'id="i2streamMainContent"' in INDEX
@@ -65,13 +65,13 @@ def test_i2stream_has_desktop_mobile_sidebar_and_main_surfaces():
     assert 'onsubmit="submitI2StreamHistoryClientId(event)"' in INDEX
     assert 'id="i2streamNodesList"' in INDEX
     assert 'id="i2streamNodesStatus"' in INDEX
-    for section in ("Knowledge", "Datacop", "Reports", "History", "Nodes", "Logmonitor"):
+    for section in ("Knowledge", "Datacop", "Custommcp", "Reports", "History", "Nodes", "Logmonitor"):
         assert f'id="i2stream{section}Tab"' in INDEX
         assert f'aria-controls="i2stream{section}Page"' in INDEX
         assert f'id="i2stream{section}Page" role="tabpanel"' in INDEX
         assert f'aria-labelledby="i2stream{section}Tab"' in INDEX
     assert 'id="i2streamKnowledgeTab" role="tab" tabindex="0"' in INDEX
-    for section in ("Datacop", "Reports", "History", "Nodes", "Logmonitor"):
+    for section in ("Datacop", "Custommcp", "Reports", "History", "Nodes", "Logmonitor"):
         assert f'id="i2stream{section}Tab" role="tab" tabindex="-1"' in INDEX
     source = MODULE_PATH.read_text(encoding="utf-8")
     for key in ("ArrowRight", "ArrowDown", "ArrowLeft", "ArrowUp", "Home", "End"):
@@ -218,6 +218,179 @@ output = {configured, calls, checked, applied, reused, whitespaceRejected};
         "api_key": "",
     }
     assert result["whitespaceRejected"] is True
+
+
+def test_custom_mcp_view_accepts_headers_json_without_authentication_fields():
+    datacop_tab = INDEX.index('data-i2stream-section="datacop"')
+    custom_tab = INDEX.index('data-i2stream-section="custommcp"')
+    reports_tab = INDEX.index('data-i2stream-section="reports"')
+    assert datacop_tab < custom_tab < reports_tab
+    assert 'id="i2streamCustommcpConfig"' in INDEX
+    assert 'onsubmit="saveI2StreamCustommcpConfig(event)"' in INDEX
+    assert 'id="i2streamCustommcpServerName"' in INDEX
+    assert 'name="server_name"' in INDEX
+    assert 'id="i2streamCustommcpServerName" name="server_name" type="text" required maxlength="64"' in INDEX
+    assert 'id="i2streamCustommcpUrl"' in INDEX
+    assert 'name="mcp_url"' in INDEX
+    headers_input = re.search(r'<textarea id="i2streamCustommcpHeaders"[^>]*>', INDEX)
+    assert headers_input is not None
+    headers_markup = headers_input.group(0)
+    assert 'name="headers"' in headers_markup
+    assert 'spellcheck="false"' in headers_markup
+    assert 'autocomplete="off"' in headers_markup
+    assert 'i2streamCustommcpAuthMode' not in INDEX
+    assert 'i2streamCustommcpBearerKey' not in INDEX
+    assert 'name="auth_mode"' not in INDEX
+    assert 'name="bearer_key"' not in INDEX
+    assert 'onclick="checkI2StreamCustommcpConfig()"' in INDEX
+    assert 'id="i2streamCustommcpConfigStatus" role="status" aria-live="polite"' in INDEX
+    source = MODULE_PATH.read_text(encoding="utf-8")
+    assert "if (headersInput) headersInput.value = '';" in source
+
+
+def test_custom_mcp_frontend_contract_is_strict_and_does_not_retain_headers():
+    result = _run_contract_case(
+        """
+const calls = [];
+sandbox.api = async (url, options) => {
+  calls.push({
+    url,
+    method: options.method,
+    body: JSON.parse(options.body),
+    retries: options.retries,
+    timeoutMs: options.timeoutMs
+  });
+  const mcp = {
+    server_name: 'private-tools',
+    mcp_url: 'https://mcp.example.test/mcp',
+    has_headers: true,
+    tool_count: 4
+  };
+  if (options.method === 'PUT') {
+    mcp.reload_required = false;
+    mcp.gateway_restart = {status: 'completed', profiles: ['default', 'stream-qa']};
+  }
+  return {code: 0, status: 'success', mcp};
+};
+const raw = {
+  server_name: 'private-tools',
+  mcp_url: 'https://mcp.example.test/mcp',
+  headers: '{"Authorization":"Bearer opaque-secret","X-Tenant":"acme"}'
+};
+const checked = await c.checkCustomMcpConnectionRequest(raw);
+const applied = await c.saveCustomMcpConfigurationRequest(raw);
+const withoutHeaders = c.normalizeCustomMcpConfiguration({
+  server_name: 'public-tools',
+  mcp_url: 'http://mcp.internal:9000/mcp',
+  headers: '   '
+});
+const invalidHeaders = [
+  '[]',
+  'null',
+  '{"":"value"}',
+  '{"X-Test":1}',
+  '{"X-Test":"line\\nvalue"}',
+  '{"Host":"mcp.example.test"}',
+  '{"content-length":"10"}',
+  '{"Transfer-Encoding":"chunked"}',
+  '{"Connection":"close"}',
+  '{"Upgrade":"websocket"}',
+  '{"Proxy-Connection":"keep-alive"}',
+  '{"Keep-Alive":"timeout=5"}',
+  '{"TE":"trailers"}',
+  '{"Trailer":"X-Checksum"}',
+  '{"X-Test":"one","x-test":"two"}',
+  JSON.stringify({"X-Test":"x".repeat(8193)}),
+  JSON.stringify(Object.fromEntries(Array.from({length: 65}, (_, index) => [`X-${index}`, 'value'])))
+];
+const rejectedHeaders = invalidHeaders.map(headers => {
+  try {
+    c.normalizeCustomMcpConfiguration({
+      server_name: 'public-tools',
+      mcp_url: 'http://mcp.internal:9000/mcp',
+      headers
+    });
+    return false;
+  } catch (error) { return error.name === 'TypeError'; }
+});
+let mismatchRejected = false;
+sandbox.api = async () => ({
+  code: 0, status: 'success',
+  mcp: {
+    server_name: 'another-name', mcp_url: 'https://mcp.example.test/mcp',
+    has_headers: true, tool_count: 4
+  }
+});
+try { await c.checkCustomMcpConnectionRequest(raw); }
+catch (error) { mismatchRejected = error.name === 'TypeError'; }
+let headerStateMismatchRejected = false;
+sandbox.api = async () => ({
+  code: 0, status: 'success',
+  mcp: {
+    server_name: 'private-tools', mcp_url: 'https://mcp.example.test/mcp',
+    has_headers: false, tool_count: 4
+  }
+});
+try { await c.checkCustomMcpConnectionRequest(raw); }
+catch (error) { headerStateMismatchRejected = error.name === 'TypeError'; }
+let incompleteApplyRejected = false;
+sandbox.api = async () => ({
+  code: 0, status: 'success',
+  mcp: {
+    server_name: 'private-tools', mcp_url: 'https://mcp.example.test/mcp',
+    has_headers: true, tool_count: 4,
+    reload_required: true,
+    gateway_restart: {status: 'completed'}
+  }
+});
+try { await c.saveCustomMcpConfigurationRequest(raw); }
+catch (error) { incompleteApplyRejected = error.name === 'TypeError'; }
+output = {calls, checked, applied, withoutHeaders, rejectedHeaders, mismatchRejected, headerStateMismatchRejected, incompleteApplyRejected};
+"""
+    )
+
+    expected_body = {
+        "server_name": "private-tools",
+        "mcp_url": "https://mcp.example.test/mcp",
+        "headers": {
+            "Authorization": "Bearer opaque-secret",
+            "X-Tenant": "acme",
+        },
+    }
+    assert result["calls"] == [
+        {
+            "url": "/api/custom-mcp/check",
+            "method": "POST",
+            "body": expected_body,
+            "retries": 0,
+            "timeoutMs": 90_000,
+        },
+        {
+            "url": "/api/custom-mcp",
+            "method": "PUT",
+            "body": expected_body,
+            "retries": 0,
+            "timeoutMs": 420_000,
+        },
+    ]
+    assert result["checked"] == {
+        "name": "private-tools",
+        "url": "https://mcp.example.test/mcp",
+        "hasHeaders": True,
+        "toolCount": 4,
+    }
+    assert result["applied"] == result["checked"]
+    assert result["withoutHeaders"] == {
+        "server_name": "public-tools",
+        "mcp_url": "http://mcp.internal:9000/mcp",
+        "headers": {},
+    }
+    assert all(result["rejectedHeaders"])
+    assert result["mismatchRejected"] is True
+    assert result["headerStateMismatchRejected"] is True
+    assert result["incompleteApplyRejected"] is True
+    assert "opaque-secret" not in json.dumps(result["checked"])
+    assert "opaque-secret" not in json.dumps(result["applied"])
 
 
 def test_knowledge_view_exposes_collection_selector_and_creator_before_upload():
