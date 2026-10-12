@@ -1,4 +1,4 @@
-"""Dashboard 对话使用的 Hermes 8641 Sessions/Runs 适配器。"""
+"""Dashboard 对话使用的 Hermes stream-qa Sessions/Runs 适配器。"""
 
 from __future__ import annotations
 
@@ -400,7 +400,7 @@ class DashboardAgentService:
                 timeout=self._request_timeout_seconds,
             )
         except httpx.HTTPError as exc:
-            raise DashboardAgentUpstreamError(502, f"Unable to reach Hermes 8641: {exc}") from exc
+            raise DashboardAgentUpstreamError(502, f"Unable to reach Hermes stream-qa: {exc}") from exc
         if response.status_code >= 400:
             raise self._upstream_error(response.status_code, response.content)
         try:
@@ -511,7 +511,7 @@ class DashboardAgentService:
             if isinstance(error, dict) and isinstance(error.get("message"), str):
                 detail = error["message"]
         public_status = status_code if 400 <= status_code < 500 else 502
-        return DashboardAgentUpstreamError(public_status, f"Hermes 8641 rejected the request: {detail}")
+        return DashboardAgentUpstreamError(public_status, f"Hermes stream-qa rejected the request: {detail}")
 
     @staticmethod
     def _bound_event(event: dict[str, Any]) -> dict[str, Any]:

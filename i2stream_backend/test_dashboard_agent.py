@@ -6,6 +6,7 @@ import unittest
 
 import httpx
 from pydantic import SecretStr
+from config import Settings
 
 from dashboard_agent import (
     DashboardAgentError,
@@ -52,14 +53,14 @@ class DashboardAgentServiceTests(unittest.IsolatedAsyncioTestCase):
         if client is not None:
             await client.aclose()
 
-    async def build_service(self, handler) -> DashboardAgentService:
+    async def build_service(self, handler, *, base_url="http://hermes.test:8641") -> DashboardAgentService:
         self.store = MemoryDashboardSessionStore()
         self.client = httpx.AsyncClient(
-            base_url="http://hermes.test:8641",
+            base_url=base_url,
             transport=httpx.MockTransport(handler),
         )
         self.service = DashboardAgentService(
-            base_url="http://hermes.test:8641",
+            base_url=base_url,
             api_key=SecretStr("test-stream-qa-key"),
             request_timeout_seconds=5.0,
             session_store=self.store,
@@ -75,6 +76,70 @@ class DashboardAgentServiceTests(unittest.IsolatedAsyncioTestCase):
                 return snapshot
             await asyncio.sleep(0)
         self.fail(f"run {run_id} did not finish")
+
+    async def test_shared_gateway_keeps_qa_prefix_for_sessions_runs_and_controls(self):
+        requests = []
+        release_events = asyncio.Event()
+
+        class RunStream(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield b'data: {"event":"approval.request","run_id":"qa_run"}\n\n'
+                await release_events.wait()
+                yield b'data: {"event":"run.cancelled","run_id":"qa_run"}\n\n'
+
+        async def handler(request):
+            self.assertEqual(request.url.port, 8642)
+            self.assertEqual(request.headers["authorization"], "Bearer test-stream-qa-key")
+            self.assertTrue(request.url.path.startswith("/p/stream-qa/"))
+            requests.append((request.method, request.url.path))
+            path = request.url.path.removeprefix("/p/stream-qa")
+            if path == "/api/sessions" and request.method == "POST":
+                return httpx.Response(201, json={"session": {"id": "qa_session", "title": "问答"}})
+            if path == "/api/sessions/qa_session":
+                if request.method == "DELETE":
+                    return httpx.Response(200, json={"deleted": True})
+                return httpx.Response(200, json={"session": {"id": "qa_session", "title": "问答"}})
+            if path == "/api/sessions/qa_session/messages":
+                return httpx.Response(200, json={"data": []})
+            if path == "/v1/runs":
+                self.assertEqual(json.loads(request.content)["session_id"], "qa_session")
+                return httpx.Response(202, json={"run_id": "qa_run", "status": "started"})
+            if path == "/v1/runs/qa_run/events":
+                return httpx.Response(200, stream=RunStream())
+            if path == "/v1/runs/qa_run/approval":
+                return httpx.Response(200, json={"run_id": "qa_run", "choice": "once", "resolved": 1})
+            if path == "/v1/runs/qa_run/stop":
+                release_events.set()
+                return httpx.Response(200, json={"run_id": "qa_run", "status": "stopping"})
+            raise AssertionError(f"Unexpected upstream URL: {request.url}")
+
+        settings = Settings(_env_file=None, session_hmac_secret="x" * 32, gateway_bridge_token="y" * 32)
+        service = await self.build_service(handler, base_url=settings.dashboard_hermes_base_url)
+        await service.create_session(self.owner_id, "问答")
+        await service.update_session(self.owner_id, "qa_session", "新标题")
+        self.assertEqual(len(await service.list_sessions(self.owner_id)), 1)
+        await service.list_messages(self.owner_id, "qa_session")
+        await service.start_run(self.owner_id, "qa_session", "查知识库")
+        for _ in range(100):
+            if ("GET", "/p/stream-qa/v1/runs/qa_run/events") in requests:
+                break
+            await asyncio.sleep(0)
+        await service.approve_run(self.owner_id, "qa_run", "once")
+        await service.stop_run(self.owner_id, "qa_run")
+        snapshot = await self.wait_for_done("qa_run")
+        self.assertEqual(snapshot["status"], "cancelled")
+        self.assertTrue(await service.delete_session(self.owner_id, "qa_session"))
+        self.assertEqual(set(requests), {
+            ("POST", "/p/stream-qa/api/sessions"),
+            ("PATCH", "/p/stream-qa/api/sessions/qa_session"),
+            ("GET", "/p/stream-qa/api/sessions/qa_session"),
+            ("GET", "/p/stream-qa/api/sessions/qa_session/messages"),
+            ("DELETE", "/p/stream-qa/api/sessions/qa_session"),
+            ("POST", "/p/stream-qa/v1/runs"),
+            ("GET", "/p/stream-qa/v1/runs/qa_run/events"),
+            ("POST", "/p/stream-qa/v1/runs/qa_run/approval"),
+            ("POST", "/p/stream-qa/v1/runs/qa_run/stop"),
+        })
 
     async def test_list_sessions_only_fetches_sessions_owned_by_user(self) -> None:
         async def handler(request: httpx.Request) -> httpx.Response:

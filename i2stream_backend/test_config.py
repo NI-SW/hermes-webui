@@ -29,14 +29,14 @@ class SettingsConfigTests(unittest.TestCase):
         self.assertEqual(settings.file_store_dir, Path("/app/data/agent-console/files"))
         self.assertEqual(settings.inbox_file_store_dir, Path("/app/data/agent-console/inbox-files"))
 
-    def test_dashboard_agent_defaults_to_8641_and_redacts_its_key(self) -> None:
+    def test_dashboard_agent_defaults_to_shared_qa_route_and_redacts_its_key(self) -> None:
         settings = Settings(
             _env_file=None,
             dashboard_hermes_api_key="stream-qa-secret",
             **self.secret_settings,
         )
 
-        self.assertEqual(settings.dashboard_hermes_base_url, "http://127.0.0.1:8641")
+        self.assertEqual(settings.dashboard_hermes_base_url, "http://127.0.0.1:8642/p/stream-qa")
         self.assertEqual(settings.dashboard_hermes_api_key.get_secret_value(), "stream-qa-secret")
         self.assertNotIn("stream-qa-secret", repr(settings))
 

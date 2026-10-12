@@ -24,6 +24,8 @@ Important variables:
 
 - `HERMES_BASE_URL`: Hermes API server URL, usually `http://127.0.0.1:8642`.
 - `HERMES_API_KEY`: server-only Bearer credential used by background feedback summaries sent to `HERMES_BASE_URL/v1/responses`.
+- `DASHBOARD_HERMES_BASE_URL`: QA Sessions/Runs API base URL, defaulting to `http://127.0.0.1:8642/p/stream-qa` in the shared Gateway deployment.
+- `DASHBOARD_HERMES_API_KEY`: server-only Bearer credential from the `stream-qa` profile, which can differ from the default profile's key.
 - `PORT`: backend port, default `50091`.
 - `PUBLIC_BASE_URL`: public base URL used in returned file links.
 - `FILE_STORE_DIR`: generated-file storage directory. Defaults to `/app/data/agent-console/files`.
@@ -188,6 +190,12 @@ HMAC-SHA256(SESSION_HMAC_SECRET, canonical_json(["v1", client_id, conversation])
 
 It then sends `request.start` to the single authenticated Hermes Gateway plugin connected at `/internal/gateway`. If no Gateway is connected the endpoint returns HTTP 503; if the same internal session already has an in-flight request it returns HTTP 409. It never falls back to `/v1/responses`.
 
+The integrated container enables this plugin only for `default`. QA Dashboard
+chat uses the shared Gateway's `/p/stream-qa` Sessions/Runs routes instead; profile
+roles, MCP settings, memory, and Hermes session databases remain separate. The
+extension's Backend URL and request format do not change. Restarting either
+logical profile replaces the same Gateway process and disconnects the Bridge.
+
 When the browser sends `X-I2H-Client-Id`, the backend stores the user message and final assistant response in SQLite for that browser identity.
 
 After the assistant response is stored, the stream emits `proxy.message.persisted` with the assistant `message_id` before `response.completed`. The browser uses this ID to associate feedback with the exact stored message instead of guessing from the latest history row.
@@ -328,6 +336,10 @@ When `stream` is `true`, the backend returns an SSE stream from:
 ```text
 http://127.0.0.1:{agent_port}/v1/responses
 ```
+
+The port is used literally; this endpoint does not map port 8641 to the QA
+profile. Dashboard QA chat uses its dedicated `/api/dashboard-agent/*` endpoints,
+which target the shared Gateway's `/p/stream-qa` Sessions/Runs API.
 
 When `stream` is `false`, the backend returns:
 

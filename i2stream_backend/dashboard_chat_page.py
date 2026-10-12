@@ -390,14 +390,14 @@ def render_dashboard_chat_view() -> str:
               <input id="dashboard-chat-search" type="search" placeholder="搜索对话" autocomplete="off" />
             </label>
             <div id="dashboard-chat-sessions" class="chat-session-list"></div>
-            <div class="chat-session-foot">会话内容保存在 Hermes 8641 对应的 profile 中。</div>
+            <div class="chat-session-foot">会话内容保存在 Hermes stream-qa profile 中。</div>
           </section>
 
           <section class="chat-workspace" aria-label="当前对话">
             <header class="chat-toolbar">
               <div class="chat-current-title">
                 <strong id="dashboard-chat-title">新对话</strong>
-                <span class="chat-connection">Hermes 8641</span>
+                <span class="chat-connection">Hermes stream-qa</span>
               </div>
               <div class="chat-toolbar-actions">
                 <button id="dashboard-chat-refresh" class="chat-quiet-button" type="button">刷新</button>
@@ -584,7 +584,7 @@ def render_dashboard_chat_view() -> str:
                 if (!Array.isArray(payload.sessions)) throw new Error("会话列表响应缺少 sessions");
                 state.sessions = payload.sessions;
                 renderSessions();
-                setStatus("已连接 Hermes 8641");
+                setStatus("已连接 Hermes stream-qa");
               };
 
               const activeSession = () => state.sessions.find((session) => session.id === state.activeSessionId);
@@ -619,7 +619,7 @@ def render_dashboard_chat_view() -> str:
                     setStatus(active.run.status === "waiting_for_approval" ? "等待授权" : "Hermes 正在处理…", "running");
                     pollRun(++state.pollGeneration);
                   } else {
-                    setStatus("已连接 Hermes 8641");
+                    setStatus("已连接 Hermes stream-qa");
                   }
                 } catch (error) {
                   if (state.activeSessionId === sessionId) setStatus(error.message, "error");
@@ -652,7 +652,7 @@ def render_dashboard_chat_view() -> str:
                 renderSessions();
                 showWelcome();
                 setRunning(false);
-                setStatus("已连接 Hermes 8641");
+                setStatus("已连接 Hermes stream-qa");
                 messageInput.focus();
               };
 

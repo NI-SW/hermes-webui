@@ -388,7 +388,12 @@ extension API, node report ingestion, knowledge/report/history storage, and the
 authenticated Hermes Gateway WebSocket bridge. The WebUI itself remains on
 port 8787 and proxies only its allowlisted i2Stream management routes to this
 loopback service. Browser chat keeps the WebUI's default in-process backend;
-the separately running Hermes Gateway remains dedicated to the extension bridge.
+the separately running, shared Hermes Gateway serves the extension bridge through
+`default` and the backend Dashboard QA chat through `/p/stream-qa` on port 8642.
+Only `default` owns the Console platform connection. The two profiles retain
+separate roles, MCP settings, memory, and session databases; restarting either
+profile replaces the shared process. The extension continues to use port 50091
+without configuration changes.
 The integrated Knowledge view supports per-file selection, select all, and a
 confirmed batch delete for clearing multiple indexed files quickly.
 The Node management view lists each reporting IP with its first and latest

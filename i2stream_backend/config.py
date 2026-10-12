@@ -20,7 +20,7 @@ class Settings(BaseSettings):
 
     hermes_base_url: str = "http://127.0.0.1:8642"
     hermes_api_key: SecretStr = SecretStr("")
-    dashboard_hermes_base_url: str = "http://127.0.0.1:8641"
+    dashboard_hermes_base_url: str = "http://127.0.0.1:8642/p/stream-qa"
     dashboard_hermes_api_key: SecretStr = SecretStr("")
     default_model: str = "hermes-agent"
     request_timeout_seconds: float = 600.0

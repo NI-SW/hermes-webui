@@ -1,4 +1,4 @@
-"""Restart the i2Stream-managed Hermes gateways without restarting the container."""
+"""Restart the shared i2Stream Hermes Gateway without restarting the container."""
 
 from __future__ import annotations
 
@@ -24,11 +24,10 @@ class GatewayTarget:
     port: int
 
 
-MANAGED_GATEWAYS = {
-    "default": GatewayTarget(profile="default", port=8642),
-    "stream-qa": GatewayTarget(profile="stream-qa", port=8641),
-}
-DEFAULT_GATEWAY_PROFILES = tuple(MANAGED_GATEWAYS)
+# MCP 配置仍分别写入两个逻辑 profile；它们由同一个 default 进程服务。
+DEFAULT_GATEWAY_PROFILES = ("default", "stream-qa")
+SHARED_GATEWAY = GatewayTarget(profile="default", port=8642)
+MANAGED_GATEWAYS = {profile: SHARED_GATEWAY for profile in DEFAULT_GATEWAY_PROFILES}
 # Hermes may spend up to 180 seconds draining active runs before the
 # supervisor can launch the replacement. Leave another 150 seconds for the
 # replacement process to initialize and publish a healthy endpoint.
@@ -66,7 +65,12 @@ def _supervisor_is_ready() -> bool:
 
 
 def _gateway_health_ready(target: GatewayTarget) -> bool:
-    request = Request(f"http://127.0.0.1:{target.port}/health", method="GET")
+    return _profile_health_ready(target.profile)
+
+
+def _profile_health_ready(profile: str) -> bool:
+    prefix = "" if profile == "default" else f"/p/{profile}"
+    request = Request(f"http://127.0.0.1:{SHARED_GATEWAY.port}{prefix}/health", method="GET")
     try:
         with urlopen(request, timeout=1.0) as response:
             return 200 <= response.status < 300
@@ -99,7 +103,7 @@ def _resolve_targets(profiles: tuple[str, ...]) -> tuple[GatewayTarget, ...]:
     unknown = [profile for profile in profiles if profile not in MANAGED_GATEWAYS]
     if unknown:
         raise ValueError(f"Unsupported managed gateway profiles: {', '.join(unknown)}")
-    return tuple(MANAGED_GATEWAYS[profile] for profile in profiles)
+    return tuple(dict.fromkeys(MANAGED_GATEWAYS[profile] for profile in profiles))
 
 
 def restart_managed_gateways(
@@ -107,11 +111,10 @@ def restart_managed_gateways(
     *,
     timeout_seconds: float = RESTART_TIMEOUT_SECONDS,
 ) -> dict[str, object]:
-    """Gracefully replace the requested supervised gateway processes.
+    """Replace the shared process once, then verify each requested profile route.
 
     The container supervisor treats Hermes' planned-restart exit code 75 as a
-    request to launch the same profile again.  Resolve every current PID before
-    signalling any process so a missing profile cannot cause a partial restart.
+    request to launch default again. A QA-only request also restarts this process.
     """
 
     targets = _resolve_targets(tuple(profiles))
@@ -140,15 +143,32 @@ def restart_managed_gateways(
                 ) from exc
 
         deadline = time.monotonic() + timeout_seconds
-        restarted: list[dict[str, object]] = []
+        new_pids: dict[str, int] = {}
         for target in targets:
             old_pid = old_pids[target.profile]
-            new_pid = _wait_for_replacement(target, old_pid, deadline)
+            new_pids[target.profile] = _wait_for_replacement(target, old_pid, deadline)
+
+        pending_profiles = list(profiles)
+        while pending_profiles and time.monotonic() < deadline:
+            pending_profiles = [
+                profile for profile in pending_profiles if not _profile_health_ready(profile)
+            ]
+            if pending_profiles:
+                time.sleep(POLL_INTERVAL_SECONDS)
+        if pending_profiles:
+            raise RuntimeError(
+                f"{', '.join(pending_profiles)} profile routes did not become healthy "
+                "before the restart timeout"
+            )
+
+        restarted: list[dict[str, object]] = []
+        for profile in profiles:
+            target = MANAGED_GATEWAYS[profile]
             restarted.append(
                 {
-                    "profile": target.profile,
-                    "old_pid": old_pid,
-                    "new_pid": new_pid,
+                    "profile": profile,
+                    "old_pid": old_pids[target.profile],
+                    "new_pid": new_pids[target.profile],
                     "port": target.port,
                 }
             )
@@ -171,15 +191,15 @@ def reset_webui_mcp_runtime() -> None:
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Restart i2Stream-managed Hermes gateways inside the running container"
+        description="Restart the shared Hermes Gateway inside the running container"
     )
     subparsers = parser.add_subparsers(dest="action", required=True)
-    restart_parser = subparsers.add_parser("restart", help="restart managed gateways")
+    restart_parser = subparsers.add_parser("restart", help="restart the shared Gateway")
     restart_parser.add_argument(
         "profiles",
         nargs="*",
         choices=tuple(MANAGED_GATEWAYS),
-        help="profiles to restart; defaults to all managed gateways",
+        help="profile routes to check after the shared restart; defaults to both profiles",
     )
     return parser.parse_args(argv)
 
