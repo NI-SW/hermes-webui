@@ -2,6 +2,7 @@ import json
 import sqlite3
 from collections import OrderedDict
 from types import SimpleNamespace
+from urllib.parse import urlparse
 
 
 def _client_message_ref(message):
@@ -229,6 +230,74 @@ def test_session_projection_attaches_feedback_without_mutating_session_messages(
 
     message_feedback.prune_feedback_for_session("feedback-session", set())
     assert message_feedback.feedback_for_session("feedback-session") == {}
+
+
+def test_feedback_message_refs_match_browser_unicode_serialization():
+    """浏览器将合法 UTF-16 pair 视为同一个字符，孤立 surrogate 保持原样。"""
+    from api import routes
+
+    for stored_text, browser_text in (
+        ("普通🙂", "普通🙂"),
+        ("before\ud83d\ude42after", "before🙂after"),
+        ("before\ud83dafter", "before\ud83dafter"),
+        ("before\udc00after", "before\udc00after"),
+    ):
+        message = {"role": "assistant", "content": stored_text, "timestamp": 12}
+        browser_ref = json.dumps(
+            {"role": "assistant", "content": browser_text, "timestamp": 12},
+            ensure_ascii=True,
+            separators=(",", ":"),
+        )
+        assert routes._assistant_anchor_scene_message_ref(message) == routes._normalize_anchor_scene_message_ref(browser_ref)
+        assert message["content"] == stored_text
+
+
+def test_session_get_restores_feedback_in_full_and_paginated_history(tmp_path, monkeypatch):
+    """会话读取入口重构后，完整历史和分页历史仍须返回反馈状态。"""
+    message_feedback, models, routes, messages = _isolated_session(tmp_path, monkeypatch)
+    first_ref = routes._assistant_anchor_scene_message_ref(messages[1])
+    final_ref = routes._assistant_anchor_scene_message_ref(messages[-1])
+    message_feedback.set_feedback("feedback-session", first_ref, "dislike")
+    message_feedback.record_feedback(
+        message_feedback.FeedbackRecord(
+            session_id="feedback-session",
+            message_ref=final_ref,
+            feedback="like",
+            status="succeeded",
+            job_id="c" * 32,
+            datacop_problem_id=91,
+            error=None,
+        )
+    )
+    captured = {}
+
+    def capture(_handler, payload, status=200, extra_headers=None):
+        captured.update(payload=payload, status=status)
+        return True
+
+    monkeypatch.setattr(routes, "j", capture)
+    monkeypatch.setattr(
+        routes,
+        "bad",
+        lambda handler, message, status=400: capture(handler, {"error": message}, status),
+    )
+    for window in ("", "&msg_limit=2", "&msg_limit=all"):
+        captured.clear()
+        parsed = urlparse(
+            "/api/session?session_id=feedback-session&resolve_model=0" + window
+        )
+        assert routes.handle_get(SimpleNamespace(headers={}), parsed) is True
+        assert captured["status"] == 200, captured
+        history = captured["payload"]["session"]["messages"]
+        final_answer = next(message for message in history if message["content"] == "final answer")
+        assert final_answer["_feedback"] == "like"
+        assert final_answer["_feedback_status"] == "succeeded"
+        assert final_answer["_feedback_message_ref"] == final_ref
+        assert final_answer["_feedback_datacop_problem_id"] == 91
+        if not window or window.endswith("all"):
+            first_answer = next(message for message in history if message["content"] == "first answer")
+            assert first_answer["_feedback"] == "dislike"
+        assert all("_feedback" not in message for message in models.SESSIONS["feedback-session"].messages)
 
 
 def test_feedback_job_status_refreshes_persisted_projection(tmp_path, monkeypatch):

@@ -164,7 +164,7 @@ def _load_profile_config_strict(config_path: Path) -> dict:
     if not config_path.exists():
         return load_profile_config_raw(config_path)
     try:
-        import yaml
+        from api import yaml_compat as yaml
     except ImportError as exc:
         raise RuntimeError("PyYAML is required to read Hermes config.yaml") from exc
     try:

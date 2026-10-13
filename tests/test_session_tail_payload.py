@@ -79,7 +79,7 @@ def test_tail_window_includes_windowed_session_tool_calls_even_when_messages_hav
 
     payload = _invoke(session)
 
-    assert payload["messages"] == [session.messages[-1]]
+    assert payload["messages"] == [{**session.messages[-1], "_feedback": None}]
     # PR #3665: always return session-level tool_calls (windowed to the
     # message window) so the browser can merge them with per-message ones.
     assert payload["tool_calls"] == [
@@ -96,7 +96,7 @@ def test_tail_window_keeps_only_visible_session_tool_calls_for_legacy_messages_w
 
     payload = _invoke(session)
 
-    assert payload["messages"] == [session.messages[-1]]
+    assert payload["messages"] == [{**session.messages[-1], "_feedback": None}]
     assert payload["tool_calls"] == [
         {"name": "visible-tool", "snippet": "visible snippet", "assistant_msg_idx": 0}
     ]
@@ -114,7 +114,10 @@ def test_full_load_keeps_all_session_tool_calls_for_legacy_messages_without_meta
         query="session_id=tail_payload_001&messages=1&resolve_model=0",
     )
 
-    assert payload["messages"] == session.messages
+    assert payload["messages"] == [
+        session.messages[0],
+        {**session.messages[1], "_feedback": None},
+    ]
     assert payload["tool_calls"] == session.tool_calls
 
 
@@ -137,7 +140,10 @@ def test_msg_before_window_keeps_only_that_page_session_tool_calls():
         query="session_id=tail_payload_001&messages=1&resolve_model=0&msg_before=3&msg_limit=2",
     )
 
-    assert payload["messages"] == session.messages[1:3]
+    assert payload["messages"] == [
+        {**session.messages[1], "_feedback": None},
+        {**session.messages[2], "_feedback": None},
+    ]
     assert payload["tool_calls"] == [
         {"name": "first-page-tool", "snippet": "kept", "assistant_msg_idx": 0},
         {"name": "second-page-tool", "snippet": "also kept", "assistant_msg_idx": 1},
@@ -164,7 +170,7 @@ def test_msg_limit_tail_does_not_run_heavy_webui_lineage_merge():
     ):
         payload = _invoke(session)
 
-    assert payload["messages"] == [session.messages[-1]]
+    assert payload["messages"] == [{**session.messages[-1], "_feedback": None}]
     assert payload["message_count"] == 2
     assert payload["_messages_truncated"] is True
 

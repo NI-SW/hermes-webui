@@ -9,6 +9,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 ANCHORS_JS = ROOT / "static" / "assistant_turn_anchors.js"
 FEEDBACK_JS = ROOT / "static" / "message_feedback.js"
+UI_JS = ROOT / "static" / "ui.js"
 INDEX_HTML = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 STYLE_CSS = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
 SW_JS = (ROOT / "static" / "sw.js").read_text(encoding="utf-8")
@@ -159,6 +160,52 @@ output={
     assert 'disabled' in result["html"]
     assert 'DataCop #91' in result["html"]
     assert result["hidden"] == ""
+
+
+def test_message_footer_preserves_feedback_and_extension_actions_together():
+    ui = UI_JS.read_text(encoding="utf-8")
+    start = ui.index("    const isEditableUser=isUser&&rawIdx===lastUserRawIdx;")
+    end = ui.index("\n    if(_isContextCompactionMessage(m)){", start)
+    footer_code = ui[start:end]
+    footer_function = """
+(function(m,isUser,isTurnFinalAssistant){
+  const rawIdx=0;
+  const lastUserRawIdx=0;
+  const isLastAssistant=!isUser;
+  const isProcessWakeup=false;
+  const displayContent=m.content;
+  const questionRawIdxByAssistantRawIdx=new Map();
+  const assistantRawIdxByQuestionRawIdx=new Map();
+""" + footer_code + """
+  return footHtml;
+})
+"""
+    result = _run_node(
+        f"""
+sandbox._formatMessageFooterTimestamp=()=>'';
+sandbox._questionJumpButtonHtml=()=>'';
+const renderFooter=vm.runInContext({json.dumps(footer_function)},sandbox);
+output={{
+  final:renderFooter({{role:'assistant',content:'answer',_feedback:'like',
+    _feedback_status:'succeeded',_feedback_datacop_problem_id:91}},false,true),
+  live:renderFooter({{role:'assistant',content:'working',_live:true}},false,true),
+  intermediate:renderFooter({{role:'assistant',content:'working'}},false,false),
+  user:renderFooter({{role:'user',content:'question'}},true,false),
+}};
+"""
+    )
+    for html in result.values():
+        assert html.count('data-extension-message-actions') == 1
+        assert 'onclick="copyMsg(this)"' in html
+    final = result["final"]
+    assert final.count('data-feedback="like"') == 1
+    assert final.count('data-feedback="dislike"') == 1
+    assert 'aria-pressed="true"' in final
+    assert 'DataCop #91' in final
+    assert 'onclick="regenerateResponse(this)"' in final
+    for state in ("live", "intermediate", "user"):
+        assert 'data-feedback=' not in result[state]
+    assert 'onclick="editMessage(this)"' in result["user"]
 
 
 def test_accepted_feedback_is_immutable_and_dislike_does_not_poll():

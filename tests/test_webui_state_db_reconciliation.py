@@ -783,7 +783,10 @@ def test_msg_limit_session_load_reads_only_recent_state_db_tail(monkeypatch, tmp
     assert captured["since_timestamp"] == 200.0
     assert captured["row_count"] == 302
     messages = handler.response_json["session"]["messages"]
-    assert messages == expected_window
+    assert messages == [
+        *expected_window[:-1],
+        {**expected_window[-1], "_feedback": None},
+    ]
     assert handler.response_json["session"]["_messages_offset"] == expected_offset
     assert messages[0]["content"] == "sidecar 472"
     assert messages[-2]["content"] == "external user"
@@ -841,7 +844,10 @@ def test_msg_limit_session_load_falls_back_with_null_state_db_timestamp(monkeypa
     assert captured["since_timestamp"] is None
     assert captured["row_count"] == 501
     session_payload = handler.response_json["session"]
-    assert session_payload["messages"] == expected_window
+    assert session_payload["messages"] == [
+        *expected_window[:-1],
+        {**expected_window[-1], "_feedback": None},
+    ]
     assert session_payload["message_count"] == len(full_all_messages)
     assert session_payload["_messages_offset"] == expected_offset
 
