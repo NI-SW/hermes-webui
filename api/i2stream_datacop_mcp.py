@@ -418,7 +418,7 @@ def apply_datacop_mcp_configuration(
                 gateway_restart = restart_managed_gateways(tuple(configured_profiles))
             except RuntimeError as exc:
                 raise RuntimeError(
-                    "DataCop MCP 配置已保存，但 Gateway 重启失败"
+                    f"DataCop MCP 配置已保存，但 Gateway 重启失败：{exc}"
                 ) from exc
             try:
                 reset_webui_mcp_runtime()

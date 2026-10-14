@@ -359,7 +359,7 @@ def apply_custom_mcp_configuration(
             try:
                 gateway_restart = restart_managed_gateways(tuple(configured_profiles))
             except RuntimeError as exc:
-                raise RuntimeError("自定义 MCP 配置已保存但重启失败") from exc
+                raise RuntimeError(f"自定义 MCP 配置已保存但重启失败：{exc}") from exc
             try:
                 reset_webui_mcp_runtime()
             except RuntimeError as exc:
@@ -504,7 +504,7 @@ def remove_custom_mcp_configuration(server_name: object) -> dict[str, object]:
             try:
                 gateway_restart = restart_managed_gateways(tuple(configured_profiles))
             except RuntimeError as exc:
-                raise RuntimeError("自定义 MCP 配置已删除但重启失败") from exc
+                raise RuntimeError(f"自定义 MCP 配置已删除但重启失败：{exc}") from exc
             try:
                 reset_webui_mcp_runtime()
             except RuntimeError as exc:

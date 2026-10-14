@@ -539,6 +539,19 @@ python3 -c "import hermes_constants; print(hasattr(hermes_constants, 'pin_proces
 
 ---
 
+## i2Stream MCP 配置保存后 Gateway 重启失败
+
+DataCop 和自定义 MCP 的错误提示会保留“配置已保存”或“配置已删除”的状态，
+并附上 Gateway 重启的具体原因。此时配置写入已经完成，需要恢复 Gateway
+并重启后才能生效；不要把此错误当作配置没有保存。
+
+如果原因是 `default gateway is not running`，检查容器内 Gateway 的进程、
+健康端点和 `gateway.pid`。进程健康但 PID 检测失败时，检查启动入口是否能被
+Hermes 的进程身份检测识别。i2Stream Docker supervisor 使用
+`"$HERMES_WEBUI_PYTHON" -m hermes_cli.main gateway run --no-supervise --external-supervisor`
+启动 Gateway，让计划重启以退出码 75 返回 supervisor。
+如果原因是重启超时，检查 Gateway 日志、运行中任务的排空和健康端点恢复情况。
+
 ## Other troubleshooting
 
 This document grows over time. If a recurring failure mode isn't covered here yet, add it via PR. The format for each entry: **Symptom → Why → Diagnostic commands → Fix → When to file a bug**.

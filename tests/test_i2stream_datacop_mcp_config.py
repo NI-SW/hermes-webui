@@ -616,8 +616,9 @@ def test_apply_datacop_mcp_configuration_probes_writes_restarts_and_resets(
     assert "opaque-key" not in json.dumps(result)
 
 
+@pytest.mark.parametrize("reason", ["default gateway is not running", "gateway timeout"])
 def test_apply_datacop_mcp_reports_saved_config_when_gateway_restart_fails(
-    monkeypatch,
+    monkeypatch, reason
 ):
     from api import i2stream_datacop_mcp
 
@@ -642,13 +643,17 @@ def test_apply_datacop_mcp_reports_saved_config_when_gateway_restart_fails(
             "missing_profiles": ["stream-qa"],
         },
     )
+    restart_error = RuntimeError(reason)
     monkeypatch.setattr(
         i2stream_datacop_mcp,
         "restart_managed_gateways",
-        lambda _profiles: (_ for _ in ()).throw(RuntimeError("gateway timeout")),
+        lambda _profiles: (_ for _ in ()).throw(restart_error),
     )
 
-    with pytest.raises(RuntimeError, match="配置已保存.*Gateway 重启失败"):
+    with pytest.raises(RuntimeError, match="配置已保存.*Gateway 重启失败") as error:
         i2stream_datacop_mcp.apply_datacop_mcp_configuration(
             "http://datacop:8301/mcp", "opaque-key"
         )
+    assert str(error.value) == f"DataCop MCP 配置已保存，但 Gateway 重启失败：{reason}"
+    assert error.value.__cause__ is restart_error
+    assert "opaque-key" not in str(error.value)

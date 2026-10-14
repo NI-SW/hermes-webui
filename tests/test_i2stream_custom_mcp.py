@@ -443,7 +443,10 @@ def test_apply_custom_mcp_configuration_orders_transaction(monkeypatch):
     assert result["gateway_restart"] == {"status": "completed"}
 
 
-def test_apply_custom_mcp_reports_saved_configuration_when_restart_fails(monkeypatch):
+@pytest.mark.parametrize("reason", ["default gateway is not running", "gateway timeout"])
+def test_apply_custom_mcp_reports_saved_configuration_when_restart_fails(
+    monkeypatch, reason
+):
     from api import i2stream_custom_mcp
 
     monkeypatch.setattr(
@@ -456,16 +459,44 @@ def test_apply_custom_mcp_reports_saved_configuration_when_restart_fails(monkeyp
         "configure_custom_mcp_profiles",
         lambda *_args: {"configured_profiles": ["default", "stream-qa"]},
     )
+    restart_error = RuntimeError(reason)
     monkeypatch.setattr(
         i2stream_custom_mcp,
         "restart_managed_gateways",
-        lambda _profiles: (_ for _ in ()).throw(RuntimeError("stopped")),
+        lambda _profiles: (_ for _ in ()).throw(restart_error),
     )
 
-    with pytest.raises(RuntimeError, match="配置已保存但重启失败"):
+    with pytest.raises(RuntimeError, match="配置已保存但重启失败") as error:
         i2stream_custom_mcp.apply_custom_mcp_configuration(
             "custom", "http://mcp.test", {}
         )
+    assert str(error.value) == f"自定义 MCP 配置已保存但重启失败：{reason}"
+    assert error.value.__cause__ is restart_error
+
+
+def test_remove_custom_mcp_reports_deleted_configuration_when_restart_fails(
+    monkeypatch,
+):
+    from api import i2stream_custom_mcp
+
+    monkeypatch.setattr(
+        i2stream_custom_mcp,
+        "delete_custom_mcp_profiles",
+        lambda _name: {"configured_profiles": ["default", "stream-qa"]},
+    )
+    restart_error = RuntimeError("default gateway is not running")
+    monkeypatch.setattr(
+        i2stream_custom_mcp,
+        "restart_managed_gateways",
+        lambda _profiles: (_ for _ in ()).throw(restart_error),
+    )
+
+    with pytest.raises(RuntimeError, match="配置已删除但重启失败") as error:
+        i2stream_custom_mcp.remove_custom_mcp_configuration("custom")
+    assert str(error.value) == (
+        "自定义 MCP 配置已删除但重启失败：default gateway is not running"
+    )
+    assert error.value.__cause__ is restart_error
 
 
 def test_list_custom_mcp_servers_filters_protected_and_aggregates_profiles(
