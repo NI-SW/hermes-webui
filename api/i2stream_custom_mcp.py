@@ -1,4 +1,4 @@
-"""Configure user-defined HTTP MCP servers in managed Hermes profiles."""
+"""Configure user-defined HTTP MCP servers in the default Hermes profile."""
 
 from __future__ import annotations
 
@@ -19,7 +19,6 @@ from api.config import (
     reload_config as reload_active_config,
 )
 from api.i2stream_gateway_restart import (
-    DEFAULT_GATEWAY_PROFILES,
     reset_webui_mcp_runtime,
     restart_managed_gateways,
 )
@@ -27,7 +26,7 @@ from api.i2stream_mcp_config_lock import mcp_config_transaction_lock
 from api.profiles import get_hermes_home_for_profile
 
 
-CUSTOM_MCP_PROFILES = DEFAULT_GATEWAY_PROFILES
+CUSTOM_MCP_PROFILES = ("default",)
 CUSTOM_MCP_MAX_HEADERS = 64
 CUSTOM_MCP_MAX_HEADER_NAME_LENGTH = 256
 CUSTOM_MCP_MAX_HEADER_VALUE_LENGTH = 8192

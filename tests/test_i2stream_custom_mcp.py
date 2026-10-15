@@ -250,7 +250,7 @@ def test_check_custom_mcp_connection_hides_probe_details(monkeypatch):
     assert "secret detail" not in str(exc_info.value)
 
 
-def test_configure_custom_mcp_profiles_updates_both_profiles_and_secures_headers(
+def test_configure_custom_mcp_profiles_updates_only_default_and_secures_headers(
     monkeypatch, tmp_path
 ):
     from api import i2stream_custom_mcp
@@ -260,6 +260,9 @@ def test_configure_custom_mcp_profiles_updates_both_profiles_and_secures_headers
         home.mkdir()
         (home / "config.yaml").write_text("model:\n  default: test\n", encoding="utf-8")
         (home / "config.yaml").chmod(0o644)
+    qa_path = homes["stream-qa"] / "config.yaml"
+    qa_original = "mcp_servers:\n  custom:\n    url: http://qa.test/mcp\n"
+    qa_path.write_text(qa_original, encoding="utf-8")
     monkeypatch.setattr(
         i2stream_custom_mcp, "get_hermes_home_for_profile", lambda profile: homes[profile]
     )
@@ -273,15 +276,17 @@ def test_configure_custom_mcp_profiles_updates_both_profiles_and_secures_headers
 
     import yaml
 
-    for home in homes.values():
-        config_path = home / "config.yaml"
-        config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-        assert config["mcp_servers"]["custom"]["headers"] == {
-            "Authorization": "Bearer opaque-token",
-            "X-Tenant": "alpha",
-        }
-        assert stat.S_IMODE(config_path.stat().st_mode) == 0o600
-    assert result["configured_profiles"] == ["default", "stream-qa"]
+    config_path = homes["default"] / "config.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert config["mcp_servers"]["custom"]["headers"] == {
+        "Authorization": "Bearer opaque-token",
+        "X-Tenant": "alpha",
+    }
+    assert stat.S_IMODE(config_path.stat().st_mode) == 0o600
+    assert qa_path.read_text(encoding="utf-8") == qa_original
+    assert stat.S_IMODE(qa_path.stat().st_mode) == 0o644
+    assert result["configured_profiles"] == ["default"]
+    assert result["missing_profiles"] == []
     assert result["has_headers"] is True
     assert "opaque-token" not in json.dumps(result)
 
@@ -325,6 +330,44 @@ def test_configure_custom_mcp_secures_existing_file_before_header_write(
         assert stat.S_IMODE(path.stat().st_mode) == 0o644
 
 
+def test_custom_mcp_does_not_resolve_other_profiles(monkeypatch, tmp_path):
+    from api import i2stream_custom_mcp
+
+    resolved = []
+
+    def default_home(profile):
+        resolved.append(profile)
+        assert profile == "default"
+        return tmp_path
+
+    monkeypatch.setattr(i2stream_custom_mcp, "get_hermes_home_for_profile", default_home)
+    monkeypatch.setattr(i2stream_custom_mcp, "reload_active_config", lambda: None)
+    monkeypatch.setattr(
+        i2stream_custom_mcp,
+        "probe_mcp_server",
+        lambda _name, _config: [("search", "Search")],
+    )
+
+    i2stream_custom_mcp.check_custom_mcp_connection("custom", "http://mcp.test", {})
+    saved = i2stream_custom_mcp.configure_custom_mcp_profiles(
+        "custom", "http://mcp.test", {}
+    )
+    assert saved["configured_profiles"] == ["default"]
+    assert saved["missing_profiles"] == []
+    assert i2stream_custom_mcp.list_custom_mcp_servers() == [
+        {
+            "server_name": "custom",
+            "mcp_url": "http://mcp.test",
+            "has_headers": False,
+            "enabled": True,
+        }
+    ]
+    deleted = i2stream_custom_mcp.delete_custom_mcp_profiles("custom")
+    assert deleted["configured_profiles"] == ["default"]
+    assert deleted["missing_profiles"] == []
+    assert resolved and set(resolved) == {"default"}
+
+
 def test_configure_custom_mcp_profiles_does_not_overwrite_malformed_yaml(
     monkeypatch, tmp_path
 ):
@@ -348,7 +391,7 @@ def test_configure_custom_mcp_profiles_does_not_overwrite_malformed_yaml(
     )
 
 
-def test_configure_custom_mcp_profiles_rolls_back_first_write(monkeypatch, tmp_path):
+def test_configure_custom_mcp_profiles_rolls_back_interrupted_write(monkeypatch, tmp_path):
     from api import i2stream_custom_mcp
 
     homes = {"default": tmp_path / "default", "stream-qa": tmp_path / "stream-qa"}
@@ -361,16 +404,12 @@ def test_configure_custom_mcp_profiles_rolls_back_first_write(monkeypatch, tmp_p
         i2stream_custom_mcp, "get_hermes_home_for_profile", lambda profile: homes[profile]
     )
     real_save = i2stream_custom_mcp.save_profile_config
-    calls = 0
 
-    def fail_second(path, config):
-        nonlocal calls
-        calls += 1
-        if calls == 2:
-            raise OSError("disk full")
+    def fail_after_write(path, config):
         real_save(path, config)
+        raise OSError("disk full")
 
-    monkeypatch.setattr(i2stream_custom_mcp, "save_profile_config", fail_second)
+    monkeypatch.setattr(i2stream_custom_mcp, "save_profile_config", fail_after_write)
 
     with pytest.raises(RuntimeError, match="配置写入失败"):
         i2stream_custom_mcp.configure_custom_mcp_profiles(
@@ -413,7 +452,7 @@ def test_apply_custom_mcp_configuration_orders_transaction(monkeypatch):
             "server_name": "custom",
             "mcp_url": "http://mcp.test",
             "has_headers": True,
-            "configured_profiles": ["default", "stream-qa"],
+            "configured_profiles": ["default"],
         },
     )
     monkeypatch.setattr(
@@ -435,7 +474,7 @@ def test_apply_custom_mcp_configuration_orders_transaction(monkeypatch):
         "lock-enter",
         ("probe", ("custom", "http://mcp.test", headers)),
         ("write", ("custom", "http://mcp.test", headers)),
-        ("restart", ("default", "stream-qa")),
+        ("restart", ("default",)),
         "reset",
         "lock-exit",
     ]
@@ -457,7 +496,7 @@ def test_apply_custom_mcp_reports_saved_configuration_when_restart_fails(
     monkeypatch.setattr(
         i2stream_custom_mcp,
         "configure_custom_mcp_profiles",
-        lambda *_args: {"configured_profiles": ["default", "stream-qa"]},
+        lambda *_args: {"configured_profiles": ["default"]},
     )
     restart_error = RuntimeError(reason)
     monkeypatch.setattr(
@@ -482,7 +521,7 @@ def test_remove_custom_mcp_reports_deleted_configuration_when_restart_fails(
     monkeypatch.setattr(
         i2stream_custom_mcp,
         "delete_custom_mcp_profiles",
-        lambda _name: {"configured_profiles": ["default", "stream-qa"]},
+        lambda _name: {"configured_profiles": ["default"]},
     )
     restart_error = RuntimeError("default gateway is not running")
     monkeypatch.setattr(
@@ -499,7 +538,7 @@ def test_remove_custom_mcp_reports_deleted_configuration_when_restart_fails(
     assert error.value.__cause__ is restart_error
 
 
-def test_list_custom_mcp_servers_filters_protected_and_aggregates_profiles(
+def test_list_custom_mcp_servers_filters_protected_and_uses_only_default(
     monkeypatch, tmp_path
 ):
     from api import i2stream_custom_mcp
@@ -558,12 +597,6 @@ mcp_servers:
             "has_headers": False,
             "enabled": True,
         },
-        {
-            "server_name": "gamma-mcp",
-            "mcp_url": "http://gamma.test/mcp",
-            "has_headers": False,
-            "enabled": True,
-        },
     ]
 
 
@@ -596,7 +629,7 @@ def test_delete_custom_mcp_rejects_nonexistent_server(monkeypatch, tmp_path):
         i2stream_custom_mcp.delete_custom_mcp_profiles("missing")
 
 
-def test_delete_custom_mcp_removes_from_profiles_and_preserves_remaining(
+def test_delete_custom_mcp_removes_from_default_and_preserves_qa(
     monkeypatch, tmp_path
 ):
     from api import i2stream_custom_mcp
@@ -615,6 +648,8 @@ mcp_servers:
             encoding="utf-8",
         )
 
+    qa_path = homes["stream-qa"] / "config.yaml"
+    qa_original = qa_path.read_bytes()
     reloaded = False
 
     def fake_reload():
@@ -631,15 +666,15 @@ mcp_servers:
     result = i2stream_custom_mcp.delete_custom_mcp_profiles("target-mcp")
 
     assert result["server_name"] == "target-mcp"
-    assert result["configured_profiles"] == ["default", "stream-qa"]
+    assert result["configured_profiles"] == ["default"]
     assert reloaded is True
 
     import yaml
 
-    for home in homes.values():
-        cfg = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))
-        assert "target-mcp" not in cfg["mcp_servers"]
-        assert "keep-mcp" in cfg["mcp_servers"]
+    cfg = yaml.safe_load((homes["default"] / "config.yaml").read_text(encoding="utf-8"))
+    assert "target-mcp" not in cfg["mcp_servers"]
+    assert "keep-mcp" in cfg["mcp_servers"]
+    assert qa_path.read_bytes() == qa_original
 
 
 def test_remove_custom_mcp_configuration_flow(monkeypatch):
@@ -662,7 +697,7 @@ def test_remove_custom_mcp_configuration_flow(monkeypatch):
         lambda name: events.append(("delete", name))
         or {
             "server_name": name,
-            "configured_profiles": ["default", "stream-qa"],
+            "configured_profiles": ["default"],
         },
     )
     monkeypatch.setattr(
@@ -681,7 +716,7 @@ def test_remove_custom_mcp_configuration_flow(monkeypatch):
     assert events == [
         "lock-enter",
         ("delete", "custom"),
-        ("restart", ("default", "stream-qa")),
+        ("restart", ("default",)),
         "reset",
         "lock-exit",
     ]

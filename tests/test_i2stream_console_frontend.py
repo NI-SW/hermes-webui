@@ -268,7 +268,7 @@ sandbox.api = async (url, options) => {
   };
   if (options.method === 'PUT') {
     mcp.reload_required = false;
-    mcp.gateway_restart = {status: 'completed', profiles: ['default', 'stream-qa']};
+    mcp.gateway_restart = {status: 'completed', profiles: ['default']};
   }
   return {code: 0, status: 'success', mcp};
 };
