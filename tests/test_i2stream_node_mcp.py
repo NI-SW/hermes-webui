@@ -133,6 +133,31 @@ def test_apply_node_mcp_configuration_requires_discovered_tools(monkeypatch):
         i2stream_node_mcp.apply_node_mcp_configuration("192.168.50.19")
 
 
+def test_apply_node_mcp_reports_saved_configuration_when_restart_fails(monkeypatch):
+    from api import i2stream_node_mcp
+
+    monkeypatch.setattr(
+        i2stream_node_mcp, "probe_mcp_server", lambda *_args: [("get_log", "Read logs")]
+    )
+    monkeypatch.setattr(
+        i2stream_node_mcp,
+        "configure_node_mcp_profile",
+        lambda _target: {"configured_profiles": ["default"]},
+    )
+    restart_error = RuntimeError("default gateway is not running")
+    monkeypatch.setattr(
+        i2stream_node_mcp,
+        "restart_managed_gateways",
+        lambda _profiles: (_ for _ in ()).throw(restart_error),
+    )
+
+    with pytest.raises(RuntimeError, match="节点 MCP 配置已保存，但 Gateway 重启失败") as error:
+        i2stream_node_mcp.apply_node_mcp_configuration("192.168.50.19")
+
+    assert error.value.__cause__ is restart_error
+    assert "default gateway is not running" in str(error.value)
+
+
 def test_configure_node_mcp_profile_rejects_name_collision(monkeypatch, tmp_path):
     from api import i2stream_node_mcp
 

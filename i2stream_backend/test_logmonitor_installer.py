@@ -543,6 +543,7 @@ class LogMonitorInstallerTests(unittest.TestCase):
         run.assert_called_once_with(
             [
                 str(python_path),
+                "/app/hermes-python.py",
                 "-m",
                 "api.i2stream_node_mcp",
                 "configure",
@@ -554,6 +555,18 @@ class LogMonitorInstallerTests(unittest.TestCase):
             timeout=45,
             check=False,
         )
+
+    def test_agent_mcp_registrar_uses_selected_runtime_python(self) -> None:
+        with patch.dict(os.environ, {"HERMES_WEBUI_PYTHON": "/selected env/bin/python"}):
+            registrar = AgentMCPRegistrar()
+
+        self.assertEqual(registrar.python_path, Path("/selected env/bin/python"))
+
+    def test_agent_mcp_registrar_explicit_python_overrides_environment(self) -> None:
+        with patch.dict(os.environ, {"HERMES_WEBUI_PYTHON": "/selected/bin/python"}):
+            registrar = AgentMCPRegistrar(python_path=Path("/explicit/bin/python"))
+
+        self.assertEqual(registrar.python_path, Path("/explicit/bin/python"))
 
     def test_agent_mcp_registrar_reports_command_failure(self) -> None:
         registrar = AgentMCPRegistrar(

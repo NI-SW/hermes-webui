@@ -149,7 +149,12 @@ def apply_node_mcp_configuration(target_ip: object) -> dict[str, object]:
                 raise RuntimeError("节点 MCP 没有返回可用工具")
 
             result = configure_node_mcp_profile(target)
-            gateway_restart = restart_managed_gateways((NODE_MCP_PROFILE,))
+            try:
+                gateway_restart = restart_managed_gateways((NODE_MCP_PROFILE,))
+            except RuntimeError as exc:
+                raise RuntimeError(
+                    f"节点 MCP 配置已保存，但 Gateway 重启失败：{exc}"
+                ) from exc
             return {
                 **result,
                 "tool_count": len(tools),

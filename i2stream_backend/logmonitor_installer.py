@@ -64,11 +64,15 @@ class AgentMCPRegistrar:
     def __init__(
         self,
         *,
-        python_path: Path = _AGENT_PYTHON_PATH,
+        python_path: Path | None = None,
         webui_path: Path = _HERMES_WEBUI_PATH,
         timeout_seconds: int = _AGENT_MCP_TIMEOUT_SECONDS,
     ):
-        self.python_path = python_path
+        self.python_path = (
+            python_path
+            if python_path is not None
+            else Path(os.environ.get("HERMES_WEBUI_PYTHON", str(_AGENT_PYTHON_PATH)))
+        )
         self.webui_path = webui_path
         self.timeout_seconds = timeout_seconds
 
@@ -90,6 +94,7 @@ class AgentMCPRegistrar:
     def register(self, target_ip: str) -> None:
         argv = [
             str(self.python_path),
+            "/app/hermes-python.py",
             "-m",
             "api.i2stream_node_mcp",
             "configure",
