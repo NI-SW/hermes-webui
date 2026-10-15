@@ -180,8 +180,12 @@ def reset_webui_mcp_runtime() -> None:
     """Drop process-local MCP connections so the next Agent turn rediscovers them."""
 
     try:
-        from tools.mcp_tool import shutdown_mcp_servers
-    except ImportError as exc:
+        from api.agent_compat import agent_attr
+
+        shutdown_mcp_servers = agent_attr(
+            "tools.mcp_tool", "shutdown_mcp_servers", "tools.mcp_tool_lifecycle"
+        )
+    except (ImportError, AttributeError) as exc:
         raise RuntimeError("Hermes WebUI MCP runtime is unavailable") from exc
     try:
         shutdown_mcp_servers()

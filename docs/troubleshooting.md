@@ -552,6 +552,12 @@ Hermes 的进程身份检测识别。i2Stream Docker supervisor 使用
 启动 Gateway，让计划重启以退出码 75 返回 supervisor。
 如果原因是重启超时，检查 Gateway 日志、运行中任务的排空和健康端点恢复情况。
 
+如果提示“配置已保存且 Gateway 已重启，但 WebUI MCP 运行时重置失败”，
+配置写入和 Gateway 重启均已完成，失败发生在 WebUI 进程的 MCP 连接清理阶段。
+新版 Hermes 将 `shutdown_mcp_servers` 移至 `tools.mcp_tool_lifecycle`；
+WebUI 必须通过 `api.agent_compat.agent_attr` 兼容新旧模块位置。
+升级包含此兼容修复的 WebUI 后重新启动 WebUI 进程即可，不需要重复添加已保存的服务。
+
 ## Other troubleshooting
 
 This document grows over time. If a recurring failure mode isn't covered here yet, add it via PR. The format for each entry: **Symptom → Why → Diagnostic commands → Fix → When to file a bug**.

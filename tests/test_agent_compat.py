@@ -168,6 +168,41 @@ def test_mcp_runtime_status_reads_agent_registry(monkeypatch, shape):
 
 
 @pytest.mark.parametrize("shape", SHAPES)
+def test_i2stream_mcp_reset_resolves_shutdown_after_agent_module_split(monkeypatch, shape):
+    from api.i2stream_gateway_restart import reset_webui_mcp_runtime
+
+    calls = []
+    _install_agent(
+        monkeypatch, shape, "tools.mcp_tool",
+        {"tools.mcp_tool_lifecycle": {"shutdown_mcp_servers": lambda: calls.append("shutdown")}},
+    )
+
+    reset_webui_mcp_runtime()
+
+    assert calls == ["shutdown"]
+
+
+@pytest.mark.parametrize("shape", SHAPES)
+def test_i2stream_mcp_reset_preserves_shutdown_failure(monkeypatch, shape):
+    from api.i2stream_gateway_restart import reset_webui_mcp_runtime
+
+    failure = RuntimeError("shutdown interrupted")
+
+    def shutdown():
+        raise failure
+
+    _install_agent(
+        monkeypatch, shape, "tools.mcp_tool",
+        {"tools.mcp_tool_lifecycle": {"shutdown_mcp_servers": shutdown}},
+    )
+
+    with pytest.raises(RuntimeError, match="Failed to reset Hermes WebUI MCP runtime") as error:
+        reset_webui_mcp_runtime()
+
+    assert error.value.__cause__ is failure
+
+
+@pytest.mark.parametrize("shape", SHAPES)
 def test_reload_mcp_command_shuts_down_and_rediscovers(monkeypatch, shape):
     import api.commands as commands
 
